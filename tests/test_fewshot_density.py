@@ -48,12 +48,18 @@ def test_extract_caps_at_char_budget_on_segment_boundary(tmp_path):
     assert "[0]" in text and "[49]" not in text
 
 
-def test_fewshot_includes_skeleton_and_trigger(tmp_path):
-    sampler = _make_sampler(tmp_path, [_clip()])
-    block = sampler.format_as_fewshot(sampler.clips[:1])
-    assert "结构骨架: 共情→自我经历→对比→建议→收束" in block
-    assert "触发: 回应弹幕" in block
-    assert "松弛的铺垫" in block  # 密度提示
+def test_fewshot_contains_style_without_source_facts(tmp_path):
+    clip = _clip()
+    marker = "海苔腰果偷吃记汇率七块变四块八LEAK_CANARY_9281"
+    clip["title"] = marker
+    clip["notes"] = {key: marker for key in clip["notes"]}
+    clip["transcript"] = [{"t": 0, "text": marker}]
+    sampler = _make_sampler(tmp_path, [clip])
+    block = sampler.format_as_fewshot(sampler.clips)
+    assert "表达统计" in block
+    assert "松弛的铺垫" in block
+    for fragment in (marker, "腰果", "汇率", "LEAK_CANARY"):
+        assert fragment not in block
 
 
 def test_prompt_objective_rewritten():

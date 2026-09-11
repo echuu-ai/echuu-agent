@@ -87,3 +87,19 @@ def test_tts_instruction_uses_natural_casual():
     engine = FakeEngine('[{"text":"哈喽哈喽","emotion":"joy"}]')
     produce_opening_events(engine, "小回", "毒舌主播", "话题", "storytelling")
     assert engine.tts.instructions  # set_instruction 被调用
+
+
+def test_opening_receives_current_user_background():
+    engine = FakeEngine('[{"text":"新手机刚拆箱。","emotion":"joy"}]')
+    background = '今年已经拿年终奖买了苹果折叠屏。'
+    produce_opening_events(engine, '角色', '数码爱好者', '年终奖买苹果折叠屏', 'storytelling', background=background)
+    assert background in engine.llm.prompts[0]
+    assert '优先保留其中已发生的事实' in engine.llm.prompts[0]
+
+
+def test_closing_receives_current_background_and_spoken_interactions():
+    engine = FakeEngine('[{"text":"膜贴好了，下次见。","emotion":"joy"}]')
+    produce_closing_events(engine, '角色', '人设', '购机', 'storytelling',
+                           background='已买折叠屏', spoken_lines=['观众送信提醒贴膜，我已经贴好了。'])
+    assert '已买折叠屏' in engine.llm.prompts[0]
+    assert '观众送信提醒贴膜，我已经贴好了。' in engine.llm.prompts[0]

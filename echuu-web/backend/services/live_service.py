@@ -329,6 +329,8 @@ class LiveService:
         async def bcast(data: dict):
             await state.broadcast(data, room_id=room_id)
 
+        spoken_lines: list[str] = []
+
         async def emit_step(result: dict, step_idx: int) -> float:
             """统一出口：音频落盘 → timeline 记录 → WS 广播。返回本句时长。"""
             audio_data = result.pop("audio", None)
@@ -348,6 +350,8 @@ class LiveService:
                 t=result.pop("timeline_t", None),
             )
             await bcast({"type": "step", **ev})
+            if ev.get("speech"):
+                spoken_lines.append(str(ev["speech"]))
             return float(duration or 0.0)
 
         try:
@@ -386,11 +390,14 @@ class LiveService:
             loop = main_loop
             card = PersonaCard.from_dict(persona_card)
 
+            current_background = background
+            background = f"【本次用户设定·故事前提】{background}\n本次主题：{topic}\n以下参考不能推翻本次故事前提；涉及现实未发生之事时按本次虚构情境讲述，不改成假货、做梦或没有发生。"
+
             # 上一场记忆注入：同角色最近一次 session 的记忆摘要 →"上次说过…"是天然跨场 call-back
             prev_memory = _load_prev_memory_summary(character_name, exclude_session=session_id)
             if prev_memory:
-                background = f"{background}\n\n【上一场直播的记忆】{prev_memory}" if background else \
-                    f"【上一场直播的记忆】{prev_memory}"
+                background = f"{background}\n\n【历史记忆·低于本次设定，不能作为本次新经历】{prev_memory}" if background else \
+                    f"【历史记忆·低于本次设定，不能作为本次新经历】{prev_memory}"
                 on_phase("已载入上一场直播的记忆")
 
             # 主题语义 grounding：联网确认网络流行语的真实用法（如"云养猫"），
@@ -410,7 +417,7 @@ class LiveService:
                 try:
                     return produce_opening_events(
                         engine, character_name, persona, topic, mode,
-                        on_phase=on_phase, tts=rundown_tts, card=card,
+                        on_phase=on_phase, tts=rundown_tts, card=card, background=current_background,
                     )
                 except Exception as exc:  # opening 失败不阻塞开播
                     print(f"[rundown] opening 生成失败（跳过）: {exc}")
@@ -534,6 +541,7 @@ class LiveService:
                         return produce_closing_events(
                             engine, character_name, persona, topic, mode,
                             on_phase=on_phase, tts=rundown_tts, card=card,
+                            background=current_background, spoken_lines=spoken_lines,
                         )
                     except Exception as exc:  # closing 失败不阻塞收播
                         print(f"[rundown] closing 生成失败（跳过）: {exc}")

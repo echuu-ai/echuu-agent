@@ -32,5 +32,5 @@ def merge_brief_into_background(background: str, topic: str, brief: str) -> str:
     """把主题简报作为背景资料段拼进 background；空 brief 原样返回。"""
     if not brief:
         return background
-    section = f"【主题背景·联网检索】「{topic}」：{brief}"
+    section = f"【主题参考·联网检索，不是主播经历】「{topic}」：{brief}\n以上仅供理解用语，不得据此否定或替换用户本次明确给定的故事前提，也不得把检索中的人物经历当作主播自己的经历。"
     return f"{background}\n\n{section}" if background else section

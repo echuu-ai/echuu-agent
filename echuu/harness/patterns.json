@@ -1,0 +1,7 @@
+[
+ {"id":"misread_label","mechanism":"misunderstanding","tags":["misunderstanding","label","rule"],"setup":"某个标记使人形成错误预期","action":"按这个标记行动，出现可见的不合理结果","resolution":"发现标记与对象错位，调整后成立","delivery":"在误解暴露处短停顿；不解释笑点","origin":"echuu_authored_pattern","do_not_copy":["其他人的名字和经历" ]},
+ {"id":"scale_mismatch","mechanism":"contrast","tags":["contrast","size","food"],"setup":"物件看起来适合任务","action":"人物的实际用量与物件容量冲突","resolution":"换合适的物件，用一个具体比较收尾","delivery":"让结果先出现，再轻轻补一句","origin":"echuu_authored_pattern","do_not_copy":["原作未发生的身份或力量"]},
+ {"id":"help_step_back","mechanism":"reversal","tags":["reversal","help","friendship"],"setup":"热心人物准备包办","action":"朋友要求自己完成，热心人物收手做辅助","resolution":"帮助通过尊重对方选择实现","delivery":"收手动作形成节奏；真诚片段不硬加梗","origin":"echuu_authored_pattern","do_not_copy":["他人的友谊经历"]},
+ {"id":"precision_meets_life","mechanism":"contrast","tags":["contrast","prediction","work"],"setup":"人物准备了精确方案","action":"一个朴素的现实细节使方案失效","resolution":"承认现实约束并做简单修正","delivery":"报出一个必要细节即可，避免堆数字","origin":"echuu_authored_pattern","do_not_copy":["原参考人物履历"]},
+ {"id":"object_callback","mechanism":"callback","tags":["callback","object","everyday"],"setup":"早先出现一个有用途的物件","action":"事件改变这个物件的用途","resolution":"结尾再次出现它，观众能联系前因","delivery":"不说‘这让我明白’，让物件完成回调","origin":"echuu_authored_pattern","do_not_copy":["参考素材的地点、人物与经历"]}
+]

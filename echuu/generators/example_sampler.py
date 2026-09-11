@@ -300,44 +300,26 @@ class ExampleSampler:
         return "\n".join(result)
 
     def format_as_fewshot(self, clips: List[Dict]) -> str:
-        """将采样的 clips 格式化为 few-shot prompt。"""
+        """Expose only numeric delivery features; source facts never enter a writer prompt.
+
+        Titles, annotations and structure notes can all contain personal history,
+        so none of their free text is forwarded, even with a 'do not copy' warning.
+        Raw transcripts remain available to offline retrieval/evaluation only.
+        """
         output = []
-
         for i, clip in enumerate(clips, 1):
-            title = clip.get("title", "未知")
-            notes = clip.get("notes", {})
-            lang = clip.get("language", "zh")
-
-            features = []
-            if notes.get("trigger"):
-                features.append(f"触发: {notes['trigger']}")
-            if notes.get("habit"):
-                features.append(f"口癖: {notes['habit']}")
-            if notes.get("emotion"):
-                features.append(f"情绪: {notes['emotion']}")
-            if notes.get("feature"):
-                feat = notes["feature"].replace("**", "")
-                features.append(f"特点: {feat}")
-
-            skeleton = notes.get("structure", "")
-            skeleton_line = f"结构骨架: {skeleton}\n" if skeleton else ""
-
-            segments = self.extract_transcript_segments(clip)
-            lang_label = "中文" if lang == "zh" else "英文"
-
+            texts = [str(seg.get("text", "")) for seg in clip.get("transcript", [])]
+            lengths = sorted(len(text) for text in texts if text)
+            if not lengths:
+                continue
+            median = lengths[len(lengths) // 2]
+            cadence = "短句为主" if median < 35 else "短长句交替" if median < 90 else "较长口语段落"
             output.append(
-                f"""
-### 真实案例 {i}: {title} ({lang_label})
-{' | '.join(features)}
-{skeleton_line}
-**完整片段（按时间顺序。注意密度：大部分时间是松弛的铺垫、重复和碎碎念，高光只有一两下）：**
-```
-{segments}
-```
-"""
+                f"### 真实案例 {i} 的表达统计（仅风格）\n"
+                f"节奏：{cadence}。松弛的铺垫逐步推进，少量高光后自然收束。\n"
+                "故事事实只来自本次人设、主题与已收到的互动；参考统计不提供人物经历、物件或事件。"
             )
-
-        return "\n".join(output)
+        return "\n\n".join(output)
 
     def get_random_examples(self, n: int = 3, language: str = "zh") -> str:
         """一键获取格式化的 few-shot examples。"""

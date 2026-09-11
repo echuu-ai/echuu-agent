@@ -39,7 +39,7 @@ from ..core.tuning_guidance import (
 )
 from ..generators.example_sampler import ExampleSampler
 from ..generators.script_writer import ScriptWriter, PROMPT_VERSION as WRITER_PROMPT_VERSION
-from ..generators.legacy_v4 import ScriptGeneratorV4
+from ..generators.legacy_v4 import ScriptGeneratorV4, adapt_duration_config
 from .danmaku import DanmakuEvaluator, DanmakuHandler
 from .danmaku_interleave import DanmakuInterleaver
 from .story_steerer import StorySteerer, annotate_remaining_beats
@@ -49,6 +49,7 @@ from .state import Danmaku, PerformanceState, PerformerMemory
 from .tts_client import TTSClient
 from .language import setup_stream_language_from_topic, StreamLanguageContext
 from .motion import pick_motion_for_danmaku, pick_motion_for_step
+from ..harness.runtime import trace_runtime, guard_steering, approve_reply
 from .audio_player import StreamSimulator
 
 
@@ -366,27 +367,54 @@ class EchuuLiveEngine:
         self.gag_ledger = GagLedger()
         seed = int(generation_seed if generation_seed is not None else random.randrange(2**32))
         if on_phase_callback:
-            on_phase_callback("Legacy V4: 生成故事内核、沉浸状态和完整剧本...")
+            on_phase_callback("Legacy V4: 筛选事件并生成 1–2 分钟角色 clip...")
         started = perf_counter()
         call_start = len(self.llm_gen.calls)
         generator = ScriptGeneratorV4(self.llm_gen, self.example_sampler)
-        # V4 and its helper banks use module-global random. Serialize the small
-        # seeded generation window so concurrent requests remain reproducible.
-        with _LEGACY_RANDOM_LOCK:
-            previous_random_state = random.getstate()
-            random.seed(seed)
-            try:
-                legacy_lines = generator.generate(
-                    name=name,
-                    persona=persona,
-                    background=background,
-                    topic=topic,
-                    language=language,
-                    character_config=character_config,
-                )
-            finally:
-                random.setstate(previous_random_state)
-
+        writer_config = dict(character_config or {})
+        writer_config.setdefault("output_format", "shareable_clip" if language.startswith("zh") else "casual")
+        voice_key = hashlib.sha256((name + "\n" + persona + "\n" + language).encode()).hexdigest()
+        voice_cache = getattr(self, "_legacy_voice_designs", {})
+        if voice_key in voice_cache:
+            writer_config.setdefault("voice_design", voice_cache[voice_key])
+        if self.persona_card and "speech_tics" not in writer_config:
+            writer_config["speech_tics"] = list(self.persona_card.speech_tics)
+        # Adapt subsequent requests only when no explicit duration was requested.
+        previous = getattr(self, "_legacy_writer_trace", {})
+        if writer_config["output_format"] == "shareable_clip":
+            writer_config.setdefault("target_seconds", 90)
+            writer_config.setdefault("candidate_count", 1 if previous.get("generation_seconds", 0) > 45 else 2)
+        else:
+            writer_config = adapt_duration_config(writer_config, previous)
+        # Keep the legacy pipeline contract; use the validated clip writer model on Qwen.
+        clip_adapter = self.llm_gen
+        if writer_config["output_format"] == "shareable_clip":
+            from .qwen_client import QwenClient
+            if isinstance(self.llm, QwenClient):
+                clip_model = writer_config.get("clip_model") or os.getenv("ECHUU_CLIP_MODEL", "qwen3-max")
+                if clip_model != self.llm.model:
+                    clip_client = QwenClient(api_key=self.llm.api_key, model=clip_model)
+                    clip_client.seed = seed
+                    clip_adapter = _LLMGenerateAdapter(clip_client)
+                    generator = ScriptGeneratorV4(clip_adapter, self.example_sampler)
+        # The revised writer is deterministic apart from the seeded provider call;
+        # do not serialize network requests with the old process-global RNG lock.
+        self.state = None
+        try:
+            legacy_lines = generator.generate(
+                name=name, persona=persona, background=background, topic=topic,
+                language=language, character_config=writer_config,
+            )
+        finally:
+            self._legacy_writer_trace = getattr(generator, "last_trace", {})
+            self._legacy_writer_trace["model"] = clip_adapter.model
+            if clip_adapter is not self.llm_gen:
+                self.llm_gen.calls.extend(clip_adapter.calls)
+        if self._legacy_writer_trace.get("status") == "completed":
+            design = self._legacy_writer_trace.get("plan", {}).get("voice_design")
+            if design:
+                voice_cache[voice_key] = design
+                self._legacy_voice_designs = voice_cache
         source_material = {
             "name": name,
             "persona": persona,
@@ -449,6 +477,7 @@ class EchuuLiveEngine:
                 "safety_issue_count": len(set(safety_issues)),
                 "safety_issues": list(dict.fromkeys(safety_issues)),
                 "dossier_enabled": False,
+                "writer_trace": self._legacy_writer_trace,
             },
             "output": [asdict(unit) for unit in units],
         })
@@ -505,7 +534,9 @@ class EchuuLiveEngine:
         pipeline = str(
             story_pipeline or os.getenv("ECHUU_STORY_PIPELINE", "legacy_v4")
         ).strip().lower()
-        if pipeline not in {"legacy_v4", "refactor"}:
+        self._harness_directory = None
+        self._harness_content = None
+        if pipeline not in {"legacy_v4", "refactor", "harness_story_v1"}:
             raise ValueError(f"unsupported story pipeline: {pipeline}")
         if hasattr(self.llm, "seed"):
             self.llm.seed = generation_seed
@@ -575,6 +606,11 @@ class EchuuLiveEngine:
         if self.persona_card:
             print(f"🎴 人设卡已加载: 口癖={list(self.persona_card.speech_tics)}, "
                   f"观众称呼={self.persona_card.audience_nickname or '（无）'}")
+
+        if pipeline == "harness_story_v1":
+            self.state = None
+            from ..harness.runtime import create_state
+            return create_state(self, name, persona, background, topic, character_config, generation_seed, on_phase_callback)
 
         if pipeline == "legacy_v4":
             return self._create_legacy_v4_performance(
@@ -854,6 +890,7 @@ class EchuuLiveEngine:
             catchphrases=catchphrases,
         )
 
+    @trace_runtime
     def run(
         self,
         max_steps: int = 12,
@@ -1045,6 +1082,7 @@ class EchuuLiveEngine:
             },
             "line": {
                 "index_in_unit": line_in_unit,
+                "id": line.id,
                 "stage": line.stage,
                 "text": speech,
                 "is_rupture": line.is_rupture,
@@ -1160,6 +1198,7 @@ class EchuuLiveEngine:
                 upcoming.append((unit, start + offset, line))
         return upcoming
 
+    @guard_steering
     def _steer_remaining_show(self, dm) -> str:
         """改还没讲的走向：挂 beats + 重写下一句。失败不挡当场回应。"""
         show = getattr(self.state, "show", None)
@@ -1253,6 +1292,8 @@ class EchuuLiveEngine:
             source_material=getattr(self, "_source_material", None),
             tuning_guidance=getattr(self, "tuning_guidance", None),
         ).text
+        if not approve_reply(self, reply):
+            return None
         try:
             audio = self.tts.synthesize(reply) if getattr(self, "tts", None) else None
         except Exception:
@@ -1278,6 +1319,8 @@ class EchuuLiveEngine:
             source_material=getattr(self, "_source_material", None),
             tuning_guidance=getattr(self, "tuning_guidance", None),
         ).text
+        if not approve_reply(self, quip):
+            return None
         try:
             audio = self.tts.synthesize(quip) if getattr(self, "tts", None) else None
         except Exception:

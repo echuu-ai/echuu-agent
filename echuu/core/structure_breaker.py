@@ -130,13 +130,20 @@ class StructureBreaker:
         Returns:
             (new_text, ending_type)
         """
+        config = character_config or {}
+        # No invented interruption, pet or generic ending unless explicitly requested.
+        if not config.get("allow_non_closure_ending", False):
+            return text, "preserved"
         endings = self.NON_CLOSURE_ENDINGS_ZH if language == "zh" else self.NON_CLOSURE_ENDINGS_EN
+        if not config.get("pet_name"):
+            endings = [(kind, [t for t in templates if "{pet_name}" not in t]) for kind, templates in endings]
+            endings = [(kind, templates) for kind, templates in endings if templates]
 
         ending_type, templates = random.choice(endings)
         template = random.choice(templates)
 
         if "{pet_name}" in template:
-            pet_name = character_config.get("pet_name", "喵") if character_config else "喵"
+            pet_name = str(config["pet_name"])
             template = template.replace("{pet_name}", pet_name)
 
         if "{next_topic}" in template:
@@ -216,7 +223,8 @@ class StructureBreaker:
         last_line["ending_type"] = ending_type
 
         # 跑毛点只由收集线索 + 主播/观众触发，剧本生成不再塞 DigressionDB 支线。
-        script_lines = self.insert_thread_loss(script_lines, probability=0.2)
+        if (character_config or {}).get("allow_thread_loss", False):
+            script_lines = self.insert_thread_loss(script_lines, probability=0.2)
 
         return script_lines
 

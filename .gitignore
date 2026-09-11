@@ -180,7 +180,10 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 
-# Output files (keep directory structure)
+# Generated experiments and live-session output stay local.
+output/*
+!output/.gitkeep
+!output/scripts/
 output/scripts/*
 !output/scripts/.gitkeep
 !output/.gitkeep

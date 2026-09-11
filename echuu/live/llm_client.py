@@ -39,7 +39,10 @@ class LLMClient:
                 if system:
                     kwargs["system"] = system
                 response = self.client.messages.create(**kwargs)
-                return response.content[0].text
+                text = "".join(block.text for block in response.content if getattr(block, "type", None) == "text")
+                if not text.strip():
+                    raise RuntimeError("Claude response contains no text blocks")
+                return text
             except Exception as exc:
                 raise RuntimeError(f"LLM 调用失败: {exc}") from exc
         raise RuntimeError("LLM 未初始化，无法调用")

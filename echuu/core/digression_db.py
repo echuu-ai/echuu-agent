@@ -38,12 +38,11 @@ def scrub_recited_topic(text: str, topic: str) -> str:
     cleaned = text
     brief = (topic or "").strip()
     hook = topic_return_hook(brief)
-    if len(brief) >= 6 and brief in cleaned:
-        cleaned = cleaned.replace(brief, hook)
-    elif len(brief) >= 14:
-        head = brief[:14]
-        if head in cleaned:
-            cleaned = cleaned.replace(head, hook)
+    if len(brief) >= 6:
+        # A topic can also be an ordinary factual phrase inside a sentence.
+        # Only shorten explicit title recitals; never erase that phrase globally.
+        recital = re.compile(r"((?:说回|回到|今天的主题是|本次主题是)\s*)" + re.escape(brief))
+        cleaned = recital.sub(lambda match: match.group(1) + hook, cleaned)
     for src, dst in _STOCK_ASIDES:
         cleaned = cleaned.replace(src, dst)
     cleaned = re.sub(r"[。．]{2,}", "。", cleaned)

@@ -70,3 +70,9 @@ def test_fabricated_hospital_anecdote_is_removed_as_a_clause():
     assert "产科病房" not in result.text
     assert "护士长" not in result.text
     assert "unsupported_fact:high_risk_domain" in result.issues
+
+
+def test_normal_topic_mention_is_not_replaced_with_a_return_hook():
+    text = "花年终奖买苹果折叠屏，我昨天刚拆封。"
+    result = sanitize_audience_text(text, source_material={"topic": "年终奖买苹果折叠屏"})
+    assert result.text == text

@@ -100,7 +100,8 @@ def test_retrieval_excludes_current_fixture_and_reports_ids(sampler):
         exclude_ids={"z1"},
     )
     assert ids == ["z2"]
-    assert "食堂打饭趣事" in formatted
+    assert "表达统计" in formatted
+    assert "食堂打饭趣事" not in formatted
     assert "读博换导师沉没成本" not in formatted
 
 
