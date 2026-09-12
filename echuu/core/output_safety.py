@@ -33,6 +33,40 @@ _HIGH_RISK_DOMAIN_CLAUSE_RE = re.compile(
     r"[^。！？!?\n]{0,60}(?:产科病房|护士长|住院记录|病历号|诊断证明|死亡证明|"
     r"劳务合同|雇佣合同|合伙协议)[^。！？!?\n]{0,60}[。！？!?]?"
 )
+# Defense in depth against the LLM walking back a story premise the user
+# actually gave this session (e.g. "already bought X") into it never having
+# happened — a photoshopped prop, an old item with a fake label, an official
+# source cited to declare the thing doesn't exist, or a quiet purchase
+# retraction. Same contract as the high-risk clauses above: only scrubbed
+# when the clause is NOT itself grounded in source_material, so a premise
+# the user genuinely wrote as "pretended to buy" survives untouched.
+_PREMISE_REVERSAL_CLAUSE_RES = (
+    re.compile(
+        r"[^。！？!?\n]{0,40}(?:P图|PS的|修图软件|合成(?:的)?照片|拼图软件|截图伪造)"
+        r"[^。！？!?\n]{0,20}(?:假装|冒充|骗|以为)[^。！？!?\n]{0,40}[。！？!?]?",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"[^。！？!?\n]{0,20}(?:官网|客服|店员|专柜)[^。！？!?\n]{0,20}(?:查|问了|搜了)"
+        r"[^。！？!?\n]{0,20}(?:没有这|不存在|查无|没有卖|还没发售|没有这款|没有这个型号)"
+        r"[^。！？!?\n]{0,20}[。！？!?]?"
+    ),
+    re.compile(
+        r"[^。！？!?\n]{0,10}(?:旧|老)[^。！？!?\n]{0,10}(?:手机|设备|机器)"
+        r"[^。！？!?\n]{0,20}贴[^。！？!?\n]{0,15}(?:标|图标|logo|贴纸)"
+        r"[^。！？!?\n]{0,20}(?:充当|冒充|假装)[^。！？!?\n]{0,20}[。！？!?]?",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"[^。！？!?\n]{0,20}(?:其实|后来|真相是)[^。！？!?\n]{0,20}"
+        r"(?:没有买|没舍得买|退货了|退款了|取消了订单|根本没花钱)[^。！？!?\n]{0,20}[。！？!?]?"
+    ),
+    re.compile(
+        r"[^。！？!?\n]{0,20}(?:奖金|年终奖|工资|薪水|存款|预算)"
+        r"[^。！？!?\n]{0,10}(?:其实|后来发现)?(?:是|为)?(?:零|没有|没发|一分没有)"
+        r"[^。！？!?\n]{0,20}[。！？!?]?"
+    ),
+)
 _STAGE_DIRECTION_RE = re.compile(
     r"[（(][^）)\n]{0,60}(?:举起|镜头|慢动作|转头|耸肩|轻笑|停顿|切镜|"
     r"提词器|麦克风|耳麦|看镜头|调音量|"
@@ -109,5 +143,13 @@ def sanitize_audience_text(
         if clause and clause not in source_text:
             issues.append("unsupported_fact:high_risk_domain")
             cleaned = cleaned.replace(clause, "这段细节没有可靠依据，我不乱补。")
+    for pattern in _PREMISE_REVERSAL_CLAUSE_RES:
+        for match in tuple(pattern.finditer(cleaned)):
+            clause = match.group(0)
+            if clause and clause not in source_text:
+                issues.append("premise_reversal")
+                cleaned = cleaned.replace(
+                    clause, "这件事就是这次真实发生的，我不会说着说着就推翻它。"
+                )
     cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip()
     return SafetyResult(cleaned or fallback, tuple(dict.fromkeys(issues)))

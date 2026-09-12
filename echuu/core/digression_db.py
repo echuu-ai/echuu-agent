@@ -2,7 +2,7 @@
 跑题素材库 - 真正的跑题，不是为铺垫服务的假跑题
 
 关键洞察：真实跑题是"联想链"
-- 说到钱 → 想到汇率 → 感慨汇率变化 → 忘了在说什么
+- 说到钱 → 想到价格 → 感慨价格变化（用模糊语言，不编造具体数字）→ 忘了在说什么
 - 说到住处 → 想到几楼 → 想到没电梯 → 跑远了
 """
 
@@ -56,19 +56,18 @@ class DigressionDB:
         "money_chain": {
             "triggers": ["钱", "贵", "便宜", "买", "花", "多少钱", "日元", "块钱"],
             "templates_zh": [
-                "那时候{currency}多少来着...{guess1}还是{guess2}？反正比现在{comparison}，诶对，{return_topic}",
-                "多少钱来着...{guess1}？不对{guess2}吧，挺{cost_adj}的——对，{return_topic}",
+                "那时候{currency}多少来着...具体数我真记不清了，反正比现在{comparison}，诶对，{return_topic}",
+                "多少钱来着...记不太清具体数了，挺{cost_adj}的——对，{return_topic}",
             ],
             "variables": {
-                "currency": ["汇率", "那边的物价"],
-                "guess1": ["六块几", "七块", "几百"],
-                "guess2": ["七块多", "六块八", "四五百"],
+                # 不编造具体数字/币种；金额一律用模糊语言，避免把没发生过的具体数字
+                # 当成主播亲身经历说出来（与 output_safety._vague_number 同一原则）。
+                "currency": ["价格", "那边的物价"],
                 "comparison": ["贵", "高"],
-                "current": ["四块八了", "五块不到", "涨了一倍"],
                 "cost_adj": ["贵", "便宜", "离谱"],
-                "cost_context": ["穷得要死", "根本买不起", "天天算着花"],
+                "cost_context": ["紧巴巴的", "根本买不起", "天天算着花"],
             },
-            "min_length": 50,
+            "min_length": 40,
         },
         "location_chain": {
             "triggers": ["住", "家", "房子", "公寓", "宿舍", "楼"],

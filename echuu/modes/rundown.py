@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import Callable, List, Optional
 
+from ..core.output_safety import sanitize_audience_text
 from .reaction import _cls_instruction, _parse_json_array
 
 _MODE_INTENT = {
@@ -56,6 +57,22 @@ def _generate_lines(engine, prompt: str) -> List[dict]:
             "language": "zh",
         })
     return lines
+
+
+def _sanitize_lines(lines: List[dict], *, name: str, persona: str, background: str, topic: str) -> List[dict]:
+    """Route opening/closing lines through the same audience-output gate the
+    legacy_v4 body already uses (echuu/live/engine.py's _create_legacy_v4_performance).
+    Opening/closing are a single unvalidated LLM call each — no semantic
+    review/repair loop — so this is their only backstop against reciting
+    internal prompt text, unsupported high-risk facts, or walking back this
+    session's own premise (see output_safety._PREMISE_REVERSAL_CLAUSE_RES)."""
+    source_material = {"name": name, "persona": persona, "background": background, "topic": topic}
+    safe: List[dict] = []
+    for line in lines:
+        result = sanitize_audience_text(line["text"], source_material=source_material)
+        if result.text:
+            safe.append(dict(line, text=result.text))
+    return safe
 
 
 def _to_events(lines: List[dict], mode: str, stage: str, tts_client,
@@ -108,6 +125,7 @@ def produce_opening_events(engine, name: str, persona: str, topic: str, mode: st
     if background:
         prompt += "\n本次用户背景（优先保留其中已发生的事实）：" + background
     lines = _generate_lines(engine, prompt)[:3]
+    lines = _sanitize_lines(lines, name=name, persona=persona, background=background, topic=topic)
     lines = engine.structure_breaker.insert_thread_loss(lines, probability=0.2)
     return _to_events(lines, mode, "opening", tts or engine.tts, on_phase)
 
@@ -128,6 +146,7 @@ def produce_closing_events(engine, name: str, persona: str, topic: str, mode: st
     if gags:
         prompt += _GAG_RECALL_RULE.format(gag=gags[0])
     lines = _generate_lines(engine, prompt)[:2]
+    lines = _sanitize_lines(lines, name=name, persona=persona, background=background, topic=topic)
     lines = engine.structure_breaker.break_structure(lines, topic=topic, language="zh")
     if gags:
         engine.gag_ledger.mark_recalled(gags[0])

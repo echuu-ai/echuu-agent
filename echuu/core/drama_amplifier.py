@@ -25,7 +25,7 @@ class DramaAmplifier:
             "name": "失败的逻辑",
             "rule": "说出那个事后看很蠢的推理",
             "before": "我试图掩盖",
-            "after": "我想着用海苔盖住应该看不出来腰果少了",
+            "after": "我当时想着重新摆整齐应该就看不出来少了一点，事后想想根本瞒不住",
         },
         "body_memory": {
             "name": "身体记忆",
@@ -48,8 +48,8 @@ class DramaAmplifier:
         "universal_hook": {
             "name": "共鸣钩子",
             "rule": "把观众拉进来",
-            "before": "腰果很香",
-            "after": "那种坚果的香味你们知道吧？闻到就走不动那种",
+            "before": "那个东西很香",
+            "after": "那种味道你们懂吧？闻到就走不动那种",
         },
     }
 

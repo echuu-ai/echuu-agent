@@ -76,3 +76,62 @@ def test_normal_topic_mention_is_not_replaced_with_a_return_hook():
     text = "花年终奖买苹果折叠屏，我昨天刚拆封。"
     result = sanitize_audience_text(text, source_material={"topic": "年终奖买苹果折叠屏"})
     assert result.text == text
+
+
+# --- Premise-reversal backstop (docs/research/2026-09-11-fewshot-leakage-retest.md
+# issue #2: 本次用户设定必须是固定前提，历史记忆/联网参考不能推翻它). Each of these
+# mirrors one of the four real failure patterns the retest log recorded for the
+# topic "年终奖买了最新的苹果折叠屏" — content priority is user setting > real
+# danmaku/gifts > this session's own aired content > memory/web reference, and
+# none of the lower tiers may walk the story back to "it never happened".
+
+def test_photoshopped_prop_reversal_is_removed():
+    result = sanitize_audience_text(
+        "其实我是拿旧照片P图假装买了新手机，骗你们的。",
+        source_material={"topic": "年终奖买了最新的苹果折叠屏"},
+    )
+    assert "P图" not in result.text
+    assert "假装" not in result.text
+    assert "premise_reversal" in result.issues
+
+
+def test_official_site_says_it_does_not_exist_reversal_is_removed():
+    result = sanitize_audience_text(
+        "我去官网查了一下，发现根本没有这款折叠屏，页面上查无此产品。",
+        source_material={"topic": "年终奖买了最新的苹果折叠屏"},
+    )
+    assert "查无此产品" not in result.text
+    assert "premise_reversal" in result.issues
+
+
+def test_old_phone_with_fake_sticker_reversal_is_removed():
+    result = sanitize_audience_text(
+        "说实话就是旧手机贴了个苹果的贴纸充当新机，糊弄你们一下。",
+        source_material={"topic": "年终奖买了最新的苹果折叠屏"},
+    )
+    assert "贴纸" not in result.text or "充当" not in result.text
+    assert "premise_reversal" in result.issues
+
+
+def test_zero_bonus_reversal_is_removed():
+    result = sanitize_audience_text(
+        "跟你们说实话，年终奖其实是零，根本没有钱买这个。",
+        source_material={"topic": "年终奖买了最新的苹果折叠屏"},
+    )
+    assert "年终奖其实是零" not in result.text
+    assert "premise_reversal" in result.issues
+
+
+def test_premise_reversal_clause_is_kept_when_the_user_actually_wrote_it():
+    """The scrub only fires when the reversal isn't grounded in this
+    session's own background/topic — a story the user genuinely wrote as
+    'pretended to buy it' must survive untouched."""
+    text = "我其实没有买，是P图假装买了新手机来整蛊粉丝。"
+    result = sanitize_audience_text(
+        text,
+        source_material={
+            "topic": "年终奖买了最新的苹果折叠屏",
+            "background": "这是一场整蛊直播：我其实没有买，是P图假装买了新手机来整蛊粉丝。",
+        },
+    )
+    assert result.text == text

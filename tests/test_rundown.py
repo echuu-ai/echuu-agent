@@ -103,3 +103,30 @@ def test_closing_receives_current_background_and_spoken_interactions():
                            background='已买折叠屏', spoken_lines=['观众送信提醒贴膜，我已经贴好了。'])
     assert '已买折叠屏' in engine.llm.prompts[0]
     assert '观众送信提醒贴膜，我已经贴好了。' in engine.llm.prompts[0]
+
+
+def test_closing_line_that_reverses_the_premise_is_scrubbed():
+    """docs/research/2026-09-11-fewshot-leakage-retest.md issue #2 failure
+    mode: closing declared the purchase fake after checking the official
+    site. Opening/closing are a single unvalidated LLM call each — this is
+    their only backstop, so it must actually fire here too, not just on the
+    legacy_v4 story body."""
+    engine = FakeEngine(
+        '[{"text":"其实我去官网查了，发现根本没有这款折叠屏，查无此产品。","emotion":"joy"}]'
+    )
+    events = produce_closing_events(
+        engine, '角色', '人设', '年终奖买了最新的苹果折叠屏', 'storytelling',
+        background='已经用年终奖买了最新的苹果折叠屏',
+    )
+    assert all('查无此产品' not in ev['speech'] for ev in events)
+
+
+def test_opening_line_that_reverses_the_premise_is_scrubbed():
+    engine = FakeEngine(
+        '[{"text":"跟你们说实话，年终奖其实是零，根本没有钱买这个。","emotion":"joy"}]'
+    )
+    events = produce_opening_events(
+        engine, '角色', '人设', '年终奖买了最新的苹果折叠屏', 'storytelling',
+        background='已经用年终奖买了最新的苹果折叠屏',
+    )
+    assert all('年终奖其实是零' not in ev['speech'] for ev in events)

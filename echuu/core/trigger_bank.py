@@ -129,8 +129,8 @@ class TriggerBank:
             {
                 "type": "sensory",
                 "template": "我刚才吃那个什么来着...{food}，吃{food}的时候突然想起来",
-                "filled": "我刚才吃那个什么来着...腰果，吃腰果的时候突然想起来",
-                "variables_used": {"food": "腰果"}
+                "filled": "我刚才吃那个什么来着...<character_config.sensory_anchors.food>，吃<...>的时候突然想起来",
+                "variables_used": {"food": "<取自 character_config.sensory_anchors.food，不预置具体人物经历>"}
             }
         """
         available_triggers = []

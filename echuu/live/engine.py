@@ -405,7 +405,22 @@ class EchuuLiveEngine:
                 name=name, persona=persona, background=background, topic=topic,
                 language=language, character_config=writer_config,
             )
-        finally:
+        except Exception as exc:
+            self._legacy_writer_trace = getattr(generator, "last_trace", {})
+            self._legacy_writer_trace["model"] = clip_adapter.model
+            if clip_adapter is not self.llm_gen:
+                self.llm_gen.calls.extend(clip_adapter.calls)
+            from .diagnostics import persist_generation_diagnostic
+            diagnostic_path = persist_generation_diagnostic(
+                root=self.project_root / "output" / "diagnostics",
+                name=name, topic=topic, language=language,
+                model=clip_adapter.model, seed=seed, error=exc,
+                trace=self._legacy_writer_trace,
+            )
+            print(f"[engine] 剧本生成未通过质量检查（{type(exc).__name__}: {exc}）；"
+                  f"诊断已写入 {diagnostic_path}")
+            raise
+        else:
             self._legacy_writer_trace = getattr(generator, "last_trace", {})
             self._legacy_writer_trace["model"] = clip_adapter.model
             if clip_adapter is not self.llm_gen:
@@ -977,7 +992,7 @@ class EchuuLiveEngine:
             quota_ok = resp_in_unit < (2 if in_window else 1)
             has_tangent = any(getattr(d, "kind", "") == "tangent" for d in self.state.danmaku_queue)
             if self.state.danmaku_queue and (has_tangent or (cooldown_ok and quota_ok)):
-                resp_ev = self._maybe_interleave_danmaku(unit_idx, last_line_text)
+                resp_ev = self._maybe_interleave_danmaku(unit_idx, last_line_text, in_window)
                 if resp_ev is not None:
                     resp_in_unit += 1
                     lines_since_resp = 0
@@ -1199,8 +1214,14 @@ class EchuuLiveEngine:
         return upcoming
 
     @guard_steering
-    def _steer_remaining_show(self, dm) -> str:
-        """改还没讲的走向：挂 beats + 重写下一句。失败不挡当场回应。"""
+    def _steer_remaining_show(self, dm, allow_followthrough: bool = True) -> str:
+        """改还没讲的走向：挂 beats + 重写下一句。失败不挡当场回应。
+
+        allow_followthrough=False（互动窗口内的收紧节奏，冷却只要 1 行）保留
+        单行响应：互动窗口下一次穿插最快只隔 1 行就能触发，若这里仍占用 2 行
+        就有非 tangent 分支之间相互覆盖尚未播出台词的风险；tangent 分支本身
+        总是恰好占 2 行且不受这个收紧节奏影响，不需要这个开关。
+        """
         show = getattr(self.state, "show", None)
         if show is None:
             return "已记下"
@@ -1257,17 +1278,39 @@ class EchuuLiveEngine:
             kind=kind,
             line=getattr(line, "text", "") or "",
         )
+        note_parts = []
         if rewritten:
             line.text = rewritten
-            return rewritten[:48]
+            note_parts.append(rewritten[:48])
+        # One line is a nod; it isn't a plot. Give the interaction an actual
+        # payoff on the next beat too (the red-envelope rescue actually gets
+        # rescued, the screen-protector reminder actually gets acted on)
+        # instead of the story quietly reverting to its unrelated original
+        # script right after the acknowledgment.
+        if allow_followthrough and len(upcoming) > 1:
+            _, _, follow_line = upcoming[1]
+            follow_up = self.story_steerer.rewrite_line(
+                spine=spine,
+                topic=self.state.topic,
+                user=dm.user,
+                trigger=trigger,
+                kind=kind,
+                line=getattr(follow_line, "text", "") or "",
+                role="followthrough",
+            )
+            if follow_up:
+                follow_line.text = follow_up
+                note_parts.append("后续跟进")
+        if note_parts:
+            return " · ".join(note_parts)
         return "后续会往观众推的方向收"
 
-    def _maybe_interleave_danmaku(self, unit_idx: int, last_line: str):
+    def _maybe_interleave_danmaku(self, unit_idx: int, last_line: str, in_window: bool = False):
         """生成一条人设化弹幕回应并构造 step 事件；失败返回 None（跳过穿插）。"""
         dm = self._pick_danmaku()
         if dm is None:
             return None
-        note = self._steer_remaining_show(dm)
+        note = self._steer_remaining_show(dm, allow_followthrough=not in_window)
         if getattr(dm, "kind", "chat") == "tangent":
             self.state.lines_since_tangent = 0
             self.emit_steering(dm, "applied", note=note)

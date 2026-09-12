@@ -35,6 +35,23 @@ _REWRITE_PROMPT = """\
 - 新剧情只沿当前主题、已有台词与本次互动展开；不得从表达示例借入人物经历。
 """
 
+_FOLLOWTHROUGH_PROMPT = """\
+你在给一场正在直播的故事改「下一句还没播出的台词」。
+上一句刚接住了观众的{kind}，这一句要交代一个具体结果或后续动作，让这件事有个着落。
+
+主轴（仍是这件事）：{spine}
+正在讲的话题：{topic}
+观众刚说/刚做：{trigger}
+
+原定下一句：
+{line}
+
+要求：
+- 只输出改写后的一句口语台词，不要解释、不要引号、不要括号说明。
+- 具体交代前一句提到的事怎么处理、结果如何，让观众推的这个方向真的往下走一步。
+- 不要另开新故事，不要念设定表，不要用「好了不说了」这类生硬收尾把话题掐掉。
+"""
+
 _TANGENT_BRANCH_PROMPT = """\
 你在给一场正在直播的故事改「下一句还没播出的台词」。
 主播刚触发跑毛点，这一句必须沿着三个线索讲一小段支线，不能另开新故事。
@@ -99,6 +116,14 @@ class StorySteerer:
                 spine=spine or topic or "正在讲的事",
                 topic=topic or "（正在讲的事）",
                 entities=entity_text,
+                trigger=sanitize_untrusted(trigger or "", max_chars=120),
+                line=line or "",
+            )
+        elif role == "followthrough":
+            prompt = _FOLLOWTHROUGH_PROMPT.format(
+                kind="投喂" if kind == "gift" else "弹幕",
+                spine=spine or topic or "正在讲的事",
+                topic=topic or "（正在讲的事）",
                 trigger=sanitize_untrusted(trigger or "", max_chars=120),
                 line=line or "",
             )
