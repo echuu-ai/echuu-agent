@@ -43,6 +43,7 @@ from ..generators.legacy_v4 import ScriptGeneratorV4, adapt_duration_config
 from .danmaku import DanmakuEvaluator, DanmakuHandler
 from .danmaku_interleave import DanmakuInterleaver
 from .story_steerer import StorySteerer, annotate_remaining_beats
+from .latency_metrics import danmaku_latency_seconds
 from .llm_factory import create_llm_client
 from .performer import PerformerV3
 from .state import Danmaku, PerformanceState, PerformerMemory
@@ -946,7 +947,19 @@ class EchuuLiveEngine:
         interact_question = ""
         quip_armed = False
 
+        # 及时性硬指标（roadmap #2）：从 run() 开始到第一次能播出、第一次真的
+        # 有音频，各自经过了多久。只测一次，不是模型打分。
+        run_started = perf_counter()
+        first_step_recorded = False
+        first_audio_recorded = False
+
         for ev in self._render_show():
+            if not first_step_recorded:
+                ev["time_to_first_step_seconds"] = round(perf_counter() - run_started, 3)
+                first_step_recorded = True
+            if not first_audio_recorded and ev.get("audio"):
+                ev["time_to_first_audio_seconds"] = round(perf_counter() - run_started, 3)
+                first_audio_recorded = True
             unit_idx = ev["unit"]["index"]
             if unit_idx != last_unit_idx:
                 resp_in_unit = 0          # 进新单元，回应额度重置
@@ -1113,7 +1126,12 @@ class EchuuLiveEngine:
         }
 
     def emit_steering(self, dm, status: str, **extra):
-        """广播一条观众触发的排队状态（queued → processing → applied → replied）。"""
+        """广播一条观众触发的排队状态（queued → processing → applied → replied）。
+
+        latency_seconds 是硬指标（roadmap #2）：从这条弹幕/礼物被创建到这次
+        状态更新经过了多久，不是模型打分，纯粹测量，applied/replied 是真正
+        有意义的读数——queued/processing 几乎总是接近 0。
+        """
         if dm is None:
             return None
         dm.status = status
@@ -1124,6 +1142,7 @@ class EchuuLiveEngine:
             "item": {**dm.to_public(), **extra},
             "queue_size": len(queue),
             "queue_position": position,
+            "latency_seconds": round(danmaku_latency_seconds(dm), 3),
         }
         callback = getattr(self, "on_steering", None)
         if callback:

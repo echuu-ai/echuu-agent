@@ -131,6 +131,35 @@ def test_maybe_interleave_falls_back_when_reply_empty():
     assert "hi" in ev["speech"]
 
 
+def test_emit_steering_reports_latency_since_danmaku_created():
+    """Roadmap #2: latency_seconds is a plain measured number, not a score."""
+    e = _engine_with(_make_show(), [])
+    dm = Danmaku.from_text("你后悔吗?", user="阿强")
+    dm.created_at -= 0.05  # pretend it was created slightly in the past
+    payload = e.emit_steering(dm, "applied")
+    assert 0.05 <= payload["latency_seconds"] < 5.0
+    assert payload["item"]["status"] == "applied"
+
+
+def test_run_annotates_time_to_first_step_once():
+    e = _engine_with(_make_show(), [])
+    events = list(e.run(max_steps=99, play_audio=False, save_audio=False))
+    with_ttfs = [ev for ev in events if "time_to_first_step_seconds" in ev]
+    assert len(with_ttfs) == 1
+    assert with_ttfs[0] is events[0]
+    assert with_ttfs[0]["time_to_first_step_seconds"] >= 0.0
+
+
+def test_run_annotates_time_to_first_audio_once():
+    e = _engine_with(_make_show(), [])
+    events = list(e.run(max_steps=99, play_audio=False, save_audio=False))
+    with_ttfa = [ev for ev in events if "time_to_first_audio_seconds" in ev]
+    # FakeTTS.synthesize always returns b"audio", so the very first event
+    # already has audio and should carry the annotation exactly once.
+    assert len(with_ttfa) == 1
+    assert with_ttfa[0] is events[0]
+
+
 def test_run_interleaves_at_most_one_per_unit():
     # 给足弹幕，验证每单元最多穿插 1 条，且故事行全部播出
     danmaku = [Danmaku.from_text(f"问题{i}?", user=f"u{i}") for i in range(8)]

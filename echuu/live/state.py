@@ -5,6 +5,7 @@ Enhanced with user memory and bonding system.
 
 from __future__ import annotations
 
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -33,6 +34,10 @@ class Danmaku:
     gift_id: str = ""
     client_id: str = ""
     status: str = "queued"  # queued | processing | applied | replied | dropped
+    # Roadmap item #2 (docs/research/2026-09-12-harness-and-vtuber-roadmap.md):
+    # 及时性硬指标 — monotonic clock, not wall time, so it's immune to system
+    # clock adjustments during a long-running stream.
+    created_at: float = field(default_factory=time.monotonic)
 
     @classmethod
     def from_text(cls, text: str, user: str = "观众") -> "Danmaku":
