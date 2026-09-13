@@ -4,6 +4,7 @@ import hashlib
 import re
 import time
 from .legacy_v4 import ScriptLineV4, SYSTEM_PROMPT, parse_object, issues_for
+from ..core.output_safety import sanitize_audience_text
 
 VOICE_DESIGNS = {
     '天上欧蒂娜': {'provenance':'中文改编设计，非原作口癖','habits':['爽快、坦率，以行动支持朋友','不频繁说王子/骑士口号，不为笑点把运动万能写成笨拙或怕普通小动物','不凭空加手机录像等未经时代设定确认的器材'], 'optional_phrases':['交给我。','等一下，这得问她。'], 'limits':'最多自然使用两次，不凑口癖'},
@@ -87,6 +88,13 @@ def _round_targets(problems, semantic):
         if sid:ids.add(sid)
         else:wide=True
     return ids,wide
+
+
+def _issue_score(problems,semantic):
+    """Lower is closer to passing. Used only to reject a repair round that
+    made things worse (see the regression guard in generate_clip) — never
+    to decide whether a draft is "good enough" to skip real validation."""
+    return len(problems)+len(semantic)
 
 
 def generate_clip(owner,name,persona,background,topic,language,config):
@@ -202,6 +210,19 @@ DATA:\n'''+json.dumps({'input':data,'plan':plan,'selected':selected},ensure_asci
                 repair_rounds.append(round_record)
                 if str(round_exc)=='clip call budget exhausted':break
                 continue  # obj/problems/semantic unchanged; next round retries from the same base
+            # Regression guard: a round that leaves MORE problems than it
+            # started with is discarded rather than adopted — the next round
+            # retries the same targets from the still-better prior state
+            # instead of compounding a bad rewrite. This is what makes the
+            # final fallback (below) meaningfully "closest to passing"
+            # instead of just "whatever the last round happened to produce".
+            if _issue_score(candidate_problems,candidate_semantic)>_issue_score(problems_before,semantic_before):
+                round_record.update(status='regressed',after_lines=[dict(l) for l in candidate_obj['lines']],
+                                     after_quotables=list(candidate_obj.get('quotables',[])),
+                                     structural_problems_after=candidate_problems,semantic_issues_after=candidate_semantic,
+                                     review=candidate_review)
+                repair_rounds.append(round_record)
+                continue  # obj/problems/semantic unchanged; retry the same targets next round
             obj,problems,semantic,review=candidate_obj,candidate_problems,candidate_semantic,candidate_review
             round_record.update(status='applied',after_lines=[dict(l) for l in obj['lines']],
                                  after_quotables=list(obj.get('quotables',[])),
@@ -211,19 +232,33 @@ DATA:\n'''+json.dumps({'input':data,'plan':plan,'selected':selected},ensure_asci
         trace['review']=review
 
         if problems or semantic:
-            trace.update(status='needs_review',final_structural_problems=problems,final_semantic_issues=semantic,
-                          rounds_attempted=round_num)
+            # Bounded repair is exhausted but obj is always a structurally
+            # valid draft (validate_draft never lets a malformed candidate
+            # get adopted above) — it just has residual quality problems a
+            # reviewer flagged. Per product decision: never let quality
+            # gating alone block a show from airing when a real draft
+            # exists. Serve the closest-to-passing draft we have, but run it
+            # through the same audience-output safety net every other line
+            # in the pipeline already passes through (prompt leaks,
+            # unsupported personal facts, premise reversal) — this does not
+            # fix "not funny enough" or "a bit short", it only guarantees
+            # the specific unsafe patterns can't reach the audience even in
+            # a degraded, not-fully-reviewed draft. The gate itself
+            # (validate_draft/validate_review/issues_for) is unchanged.
             reason='clip constraints unresolved' if problems else 'semantic repair unresolved'
-            raise ClipGenerationError(
-                f'{reason} after {round_num} bounded targeted rewrite round(s)',
-                diagnostic={
-                    'reason':reason,'rounds_attempted':round_num,'max_repair_rounds':max_rounds,
-                    'final_structural_problems':problems,'final_semantic_issues':semantic,
-                    'repair_rounds':repair_rounds,'initial_draft':trace.get('initial_draft'),
-                    'initial_issues':trace.get('initial_issues'),
-                    'input':data,'plan':plan,
-                },
-            )
+            safety_issues=[]
+            safe_lines=[]
+            for line in obj['lines']:
+                result=sanitize_audience_text(line['text'],source_material=data)
+                safety_issues.extend(result.issues)
+                safe_lines.append({**line,'text':result.text or line['text']})
+            obj={**obj,'lines':safe_lines}
+            trace.update(status='completed_degraded',degraded_reason=reason,
+                          final_structural_problems=problems,final_semantic_issues=semantic,
+                          rounds_attempted=round_num,degraded_safety_issues=safety_issues,
+                          final_draft=obj,chars=sum(len(l['text']) for l in obj['lines']),
+                          semantic_status='degraded_not_fully_reviewed',audio_status='not_measured')
+            return [ScriptLineV4(id=l['id'],text=l['text'],stage='Hook' if i==0 else 'Resolution' if i==len(obj['lines'])-1 else 'Build-up',interruption_cost=.4,key_info=[]) for i,l in enumerate(obj['lines'])]
         trace.update(status='completed',final_draft=obj,chars=sum(len(l['text']) for l in obj['lines']),
                       semantic_status='reviewed',audio_status='not_measured',rounds_attempted=round_num)
         return [ScriptLineV4(id=l['id'],text=l['text'],stage='Hook' if i==0 else 'Resolution' if i==len(obj['lines'])-1 else 'Build-up',interruption_cost=.4,key_info=[]) for i,l in enumerate(obj['lines'])]

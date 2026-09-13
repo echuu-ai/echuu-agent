@@ -426,6 +426,23 @@ class EchuuLiveEngine:
             self._legacy_writer_trace["model"] = clip_adapter.model
             if clip_adapter is not self.llm_gen:
                 self.llm_gen.calls.extend(clip_adapter.calls)
+            if self._legacy_writer_trace.get("status") == "completed_degraded":
+                # Product decision: quality gating alone must never block a
+                # show from airing when a real (if imperfect) draft exists —
+                # generator.generate() already served the closest-to-passing
+                # draft through the audience-safety net instead of raising.
+                # It still needs the same paper trail a hard failure would
+                # get, so this doesn't quietly look identical to a clean pass.
+                from .diagnostics import persist_generation_diagnostic
+                diagnostic_path = persist_generation_diagnostic(
+                    root=self.project_root / "output" / "diagnostics",
+                    name=name, topic=topic, language=language,
+                    model=clip_adapter.model, seed=seed, outcome="degraded",
+                    trace=self._legacy_writer_trace,
+                )
+                print(f"[engine] 剧本未完全通过质量检查，已播出最接近达标的版本"
+                      f"（{self._legacy_writer_trace.get('degraded_reason')}）；"
+                      f"诊断已写入 {diagnostic_path}")
         if self._legacy_writer_trace.get("status") == "completed":
             design = self._legacy_writer_trace.get("plan", {}).get("voice_design")
             if design:

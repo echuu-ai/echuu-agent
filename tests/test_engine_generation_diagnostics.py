@@ -92,6 +92,50 @@ def test_failed_generation_persists_diagnostic_and_reraises(monkeypatch, tmp_pat
     assert eng._legacy_writer_trace["status"] == "needs_review"
 
 
+def test_degraded_generation_persists_diagnostic_and_does_not_raise(monkeypatch, tmp_path):
+    """Product decision: quality gating alone must never block a show from
+    airing when a real draft exists. generate() serving a closest-to-passing
+    draft instead of raising must still leave the same paper trail a hard
+    failure would have — just tagged 'degraded', not 'failed' — and must not
+    itself raise."""
+    from echuu.generators.legacy_v4 import ScriptLineV4
+
+    class _DegradedGenerator:
+        def __init__(self, llm, example_sampler=None):
+            self.llm = llm
+            self.last_trace = {
+                "status": "completed_degraded",
+                "degraded_reason": "clip constraints unresolved",
+                "rounds_attempted": 2,
+                "repair_rounds": [{"round": 1, "before_lines": [], "after_lines": []}],
+                "final_structural_problems": [{"code": "duration", "chars": 40}],
+                "final_semantic_issues": [],
+            }
+
+        def generate(self, **kwargs):
+            return [ScriptLineV4(id="L001", text="最接近达标但没完全通过的台词", stage="Hook", interruption_cost=0.4)]
+
+    eng, engmod = _make_engine(monkeypatch, tmp_path)
+    monkeypatch.setattr(engmod, "ScriptGeneratorV4", _DegradedGenerator)
+    try:
+        eng._create_legacy_v4_performance(
+            name="主播", persona="人设", background="年终奖买了最新的苹果折叠屏",
+            topic="年终奖买了最新的苹果折叠屏", language="zh", character_config=None,
+            on_phase_callback=None, generation_seed=7,
+        )
+    except Exception:
+        pass  # downstream unit-planning isn't stubbed here; only the diagnostic write matters
+
+    diagnostics_dir = tmp_path / "output" / "diagnostics"
+    files = list(diagnostics_dir.glob("*.json"))
+    assert len(files) == 1
+    payload = json.loads(files[0].read_text(encoding="utf-8"))
+    assert payload["outcome"] == "degraded"
+    assert payload["writer_trace"]["status"] == "completed_degraded"
+    assert payload["writer_trace"]["rounds_attempted"] == 2
+    assert eng._legacy_writer_trace["status"] == "completed_degraded"
+
+
 def test_successful_generation_does_not_write_a_diagnostic(monkeypatch, tmp_path):
     """Diagnostics are for failures; a clean run shouldn't litter output/."""
     from echuu.live import engine as engmod

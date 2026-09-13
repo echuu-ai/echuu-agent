@@ -22,10 +22,12 @@ def test_clip_retains_previous_style_guards():
     codes={x['code'] for x in validate_draft(d,{'min_chars':1,'max_chars':500},{})}
     assert {'defensive_contrast','unassigned_tic'}<=codes
 
-def test_repair_requires_fresh_review_and_rejection_is_not_playable():
+def test_repair_exhaustion_serves_the_draft_instead_of_blocking_the_show():
     """Bounded to a single round here (max_repair_rounds=1) so a persistently
-    rejecting reviewer still exhausts and fails cleanly — quality gates are
-    never relaxed just because the round budget ran out."""
+    rejecting reviewer still exhausts. Product decision: quality gating alone
+    must never block a show from airing when a real draft exists — the
+    closest-to-passing draft is served, but flagged clearly as degraded so
+    it never looks like a clean pass, and the full diagnostic is retained."""
     import json
     from echuu.generators.legacy_v4 import ScriptGeneratorV4
     plan={'candidates':[dict(id='a',premise='误会',expectation='拒绝',surprise='偷偷帮忙',resolution='一起完成',character_choice='指出嘴硬',share_reason='亲近')],'selected_id':'a','voice_design':{'provenance':'改编'}}
@@ -37,11 +39,14 @@ def test_repair_requires_fresh_review_and_rejection_is_not_playable():
         def __init__(self):self.values=iter([plan,d,rejection,d,rejection]);self.calls=0
         def call(self,*args,**kwargs):self.calls+=1;return json.dumps(next(self.values),ensure_ascii=False)
     llm=Fake();g=ScriptGeneratorV4(llm)
-    with pytest.raises(ValueError,match='semantic repair unresolved'):
-        g.generate('角色','人设','背景','话题',character_config={'output_format':'shareable_clip','max_repair_rounds':1})
-    assert llm.calls==5 and g.last_trace['status']=='needs_review'
+    lines=g.generate('角色','人设','背景','话题',character_config={'output_format':'shareable_clip','max_repair_rounds':1})
+    assert llm.calls==5
+    assert lines and all(l.text for l in lines)  # something real was served, not nothing
+    assert g.last_trace['status']=='completed_degraded'
+    assert g.last_trace['degraded_reason']=='semantic repair unresolved'
     assert g.last_trace['rounds_attempted']==1
     assert len(g.last_trace['repair_rounds'])==1
+    assert g.last_trace['final_semantic_issues']
 
 
 def test_bounded_repair_succeeds_on_a_later_round_after_an_earlier_one_fails():
@@ -117,13 +122,12 @@ def test_scoped_repair_round_never_changes_untargeted_lines():
     assert g.last_trace['status']=='completed'
 
 
-def test_final_failure_carries_structured_diagnostic_not_just_a_string():
-    """On exhaustion, the raised error and the trace both carry the specific
-    flagged lines and every round's before/after content — not just the
-    bare 'constraints unresolved' string."""
+def test_degraded_serve_carries_structured_diagnostic_not_just_a_string():
+    """On exhaustion, the trace carries the specific flagged lines and every
+    round's before/after content — not just a bare 'constraints unresolved'
+    string — even though generation no longer raises for this case."""
     import json
     from echuu.generators.legacy_v4 import ScriptGeneratorV4
-    from echuu.generators.shareable_clip import ClipGenerationError
     plan={'candidates':[dict(id='a',premise='误会',expectation='拒绝',surprise='偷偷帮忙',resolution='一起完成',character_choice='指出嘴硬',share_reason='亲近')],'selected_id':'a','voice_design':{'provenance':'改编'}}
     too_short=draft()  # 5 short lines: fails the duration floor and never gets fixed
     passing={'verdict':'pass','issues':[],'story_summary':'s','share_reason':'r'}
@@ -135,16 +139,43 @@ def test_final_failure_carries_structured_diagnostic_not_just_a_string():
             if '修复编辑' in system:return json.dumps(too_short,ensure_ascii=False)
             return json.dumps(next(self.values),ensure_ascii=False)
     llm=Fake();g=ScriptGeneratorV4(llm)
-    with pytest.raises(ClipGenerationError) as excinfo:
-        g.generate('角色','人设','背景','话题',character_config={'output_format':'shareable_clip','max_repair_rounds':2})
-    diagnostic=excinfo.value.diagnostic
-    assert diagnostic['reason']=='clip constraints unresolved'
-    assert diagnostic['rounds_attempted']==2
-    assert any(p['code']=='duration' for p in diagnostic['final_structural_problems'])
-    assert len(diagnostic['repair_rounds'])==2
-    for round_record in diagnostic['repair_rounds']:
+    lines=g.generate('角色','人设','背景','话题',character_config={'output_format':'shareable_clip','max_repair_rounds':2})
+    assert lines and all(l.text for l in lines)
+    trace=g.last_trace
+    assert trace['status']=='completed_degraded'
+    assert trace['degraded_reason']=='clip constraints unresolved'
+    assert trace['rounds_attempted']==2
+    assert any(p['code']=='duration' for p in trace['final_structural_problems'])
+    assert len(trace['repair_rounds'])==2
+    for round_record in trace['repair_rounds']:
         assert 'before_lines' in round_record and 'after_lines' in round_record
-    assert g.last_trace['repair_rounds']==diagnostic['repair_rounds']
+
+
+def test_degraded_serve_still_runs_the_audience_safety_net():
+    """A duration problem the reviewer never flags keeps forcing repair
+    rounds (and exhausting them); a premise-reversal phrase the (fake,
+    imperfect) reviewer *also* never catches must still never reach the
+    audience — the mechanical safety net is the backstop for exactly the
+    case where the LLM review misses something."""
+    import json
+    from echuu.generators.legacy_v4 import ScriptGeneratorV4
+    plan={'candidates':[dict(id='a',premise='误会',expectation='拒绝',surprise='偷偷帮忙',resolution='一起完成',character_choice='指出嘴硬',share_reason='亲近')],'selected_id':'a','voice_design':{'provenance':'改编'}}
+    bad=draft()
+    bad['lines'][0]['text']='我去官网查了一下，发现根本没有这款折叠屏，页面上查无此产品。'
+    passing={'verdict':'pass','issues':[],'story_summary':'s','share_reason':'r'}  # reviewer misses it
+    class Fake:
+        def __init__(self):
+            self.values=iter([plan,bad,passing,passing]);self.calls=0
+        def call(self,prompt,system='',**kwargs):
+            self.calls+=1
+            if '修复编辑' in system:return json.dumps(bad,ensure_ascii=False)
+            return json.dumps(next(self.values),ensure_ascii=False)
+    llm=Fake();g=ScriptGeneratorV4(llm)
+    lines=g.generate('角色','人设','年终奖买了最新的苹果折叠屏','年终奖买了最新的苹果折叠屏',
+                     character_config={'output_format':'shareable_clip','max_repair_rounds':1})
+    assert g.last_trace['status']=='completed_degraded'
+    assert '查无此产品' not in lines[0].text
+    assert g.last_trace['degraded_safety_issues']
 
 def test_contrast_with_dash_does_not_escape_guard():
     from echuu.generators.legacy_v4 import issues_for
