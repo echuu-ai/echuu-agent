@@ -374,7 +374,7 @@ class CosyVoiceTTS:
         self.volume = int(os.getenv("TTS_VOLUME", "50"))
         self.pitch_rate = float(os.getenv("TTS_PITCH_RATE", "1.0"))
         self.bit_rate = int(os.getenv("TTS_BIT_RATE", "128"))
-        self.timeout = float(os.getenv("TTS_TIMEOUT", "60"))
+        self.timeout = float(os.getenv("TTS_TIMEOUT", "12"))
 
         region = os.getenv("TTS_REGION", "cn").lower()
         self.ws_url = os.getenv("TTS_WS_URL")
@@ -434,45 +434,50 @@ class CosyVoiceTTS:
             callback=callback,
             url=self.ws_url,
         )
-        qwen_tts_realtime.connect()
+        try:
+            qwen_tts_realtime.connect()
 
-        # Auto-detect language if set to "auto" or empty
-        language = self.language_type
-        if language.lower() in ("auto", ""):
-            language = detect_language(text)
-            if language == "auto":
-                language = "Chinese"  # Fallback
+            # Auto-detect language if set to "auto" or empty
+            language = self.language_type
+            if language.lower() in ("auto", ""):
+                language = detect_language(text)
+                if language == "auto":
+                    language = "Chinese"  # Fallback
 
-        # Auto-select voice that supports the detected language
-        voice = get_multilingual_voice(self.voice, language, self.model)
+            # Auto-select voice that supports the detected language
+            voice = get_multilingual_voice(self.voice, language, self.model)
 
-        response_format = self._resolve_realtime_audio_format()
-        kwargs = {
-            "voice": voice,
-            "response_format": response_format,
-            "mode": self.mode,
-            "language_type": language,
-        }
-        # 只有qwen3-tts-flash-realtime支持这些参数，旧版qwen-tts-realtime不支持
-        if "qwen3" in self.model:
-            kwargs.update({
-                "speech_rate": self.speech_rate,
-                "volume": self.volume,
-                "pitch_rate": self.pitch_rate,
-            })
-        if self.response_format.lower() == "opus":
-            kwargs["bit_rate"] = self.bit_rate
-        if "instruct" in self.model and self.instruction:
-            kwargs["instructions"] = self.instruction
+            response_format = self._resolve_realtime_audio_format()
+            kwargs = {
+                "voice": voice,
+                "response_format": response_format,
+                "mode": self.mode,
+                "language_type": language,
+            }
+            # 只有qwen3-tts-flash-realtime支持这些参数，旧版qwen-tts-realtime不支持
+            if "qwen3" in self.model:
+                kwargs.update({
+                    "speech_rate": self.speech_rate,
+                    "volume": self.volume,
+                    "pitch_rate": self.pitch_rate,
+                })
+            if self.response_format.lower() == "opus":
+                kwargs["bit_rate"] = self.bit_rate
+            if "instruct" in self.model and self.instruction:
+                kwargs["instructions"] = self.instruction
 
-        qwen_tts_realtime.update_session(**kwargs)
-        qwen_tts_realtime.append_text(text)
-        if self.mode == "commit":
-            qwen_tts_realtime.commit()
-        qwen_tts_realtime.finish()
+            qwen_tts_realtime.update_session(**kwargs)
+            qwen_tts_realtime.append_text(text)
+            if self.mode == "commit":
+                qwen_tts_realtime.commit()
+            qwen_tts_realtime.finish()
 
-        callback.wait_for_complete(self.timeout)
-        qwen_tts_realtime.close()
+            completed = callback.wait_for_complete(self.timeout)
+        finally:
+            qwen_tts_realtime.close()
+        if not completed:
+            print("[TTS] 等待音频超时，本句保留字幕")
+            return b""
         
         audio_data = callback.get_audio()
         # 如果返回的是PCM，转换为WAV

@@ -8,6 +8,7 @@ from echuu.core.unit import AcousticHint, Rupture, ScriptLine, Show, Unit
 
 
 class FakeTTS:
+    enabled = True
     def __init__(self):
         self.update_calls: list[dict] = []
         self.synth_calls: list[str] = []
@@ -92,7 +93,7 @@ def test_render_yields_step_event_per_line(monkeypatch):
         assert ev["line"]["stage"] in ("hook", "pad", "turn")
 
 
-def test_render_continues_when_tts_returns_none(monkeypatch):
+def test_render_reports_failure_when_enabled_tts_returns_none(monkeypatch):
     from echuu.live.engine import EchuuLiveEngine
     engine = EchuuLiveEngine.__new__(EchuuLiveEngine)
     engine.tts = FakeTTS()
@@ -100,7 +101,5 @@ def test_render_continues_when_tts_returns_none(monkeypatch):
     engine.danmaku_handler = None
     engine.state = type("S", (), {"show": _make_show(), "memory": None})()
 
-    events = list(engine._render_show())
-    assert len(events) == 12
-    failed = [ev for ev in events if ev["line"]["text"] == "u1 pad"][0]
-    assert failed["audio"] is None
+    with pytest.raises(RuntimeError, match="语音生成失败"):
+        list(engine._render_show())

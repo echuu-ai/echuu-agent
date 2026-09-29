@@ -1,14 +1,8 @@
-"""DanmakuInterleaver — 在讲故事的间隙穿插一句人设化的弹幕回应。
-
-Cursor 式交付：故事行是队列，主播讲完一行后在断点回应一条弹幕，再回到故事。
-约束（spec 反馈）：弹幕只穿插【反应】，不改主播讲故事的方式与关注的重点；
-故事队列本身不被改写。回应简短、带语癖、点名观众、最后拉回正在讲的事。
-
-See docs/superpowers/specs/2026-05-31-rupture-engine-content-quality-design.md.
-"""
+"""直播断句处的简短互动回应；后续剧情由 StorySteerer 单独连续改写。"""
 from __future__ import annotations
 
 from typing import Protocol
+import json
 
 from echuu.live.untrusted import render_untrusted, sanitize_untrusted
 
@@ -18,20 +12,23 @@ class _LLM(Protocol):
 
 
 _PROMPT = """\
-你在演一个正在直播讲故事的主播，此刻有条弹幕飘过，你要【插一句话】回应观众，然后马上回到你的故事。
+你在演一个正在直播讲故事的主播，此刻有条弹幕飘过，你要【插一句话】回应观众，然后自然接到当前话题的后续内容。
 
 你是谁：{identity}
 你的语癖（用一个）：{verbal_tics}
-你正在讲的事（重点，别跑偏）：{topic}
+你接下来正在讲的事：{topic}
+本次处理决定与近期已播内容：{evolution}
 你刚说到：{last_line}
 
 弹幕来自观众「{user}」：
 {danmaku}
 
 要求：
-- 只回 1-2 句，像真主播随口接一下，自然口语，带一点你的语癖。
-- 点一下这位观众（用名字或泛称），简短反应，然后一句话拉回你正在讲的事。
-- 绝不改变你故事的重点和走向，别开新话题、别长篇大论。
+- 只回一句，15到30字，最多40字。自然口语，不强塞口癖。
+- 根据处理决定，简单回应、补充当前话题或接向相关新话题；如果仅回应，不要承诺后面展开。
+- 已进入新话题时不要说“先回原来的故事”，不要否认前面已经说过的事情。
+- 礼物按真实名称和类别理解，饭团是食物，不是石头；不要念旧资源ID。
+- 不要强行说回原稿，不复述之前的台词，不添加产品事实。
 - 只输出你要说的话，不要任何解释、不要引号、不要括号说明。
 {card_rules}"""
 
@@ -54,7 +51,7 @@ class DanmakuInterleaver:
 
     def respond(self, *, identity: str, verbal_tics, topic: str,
                 last_line: str, danmaku_text: str, user: str,
-                card=None, gags=None) -> str | None:
+                card=None, gags=None, evolution=None) -> str | None:
         tics = "、".join(verbal_tics) if verbal_tics else "（自然口语）"
         # 人设卡加成：固定称呼；雷点被戳 → 破防加倍；骄傲点被夸/被质疑 → 反应加倍；顺手挂已埋的梗
         card_rules = ""
@@ -85,6 +82,7 @@ class DanmakuInterleaver:
             user=sanitize_untrusted(user or "观众", max_chars=24),
             danmaku=render_untrusted(danmaku_text or ""),
             card_rules=card_rules,
+            evolution=json.dumps(evolution or {}, ensure_ascii=False),
         )
         try:
             reply = self.llm.generate(prompt)
@@ -92,6 +90,8 @@ class DanmakuInterleaver:
             print(f"[DanmakuInterleaver] LLM 调用失败，跳过本次穿插: {exc}")
             return None
         reply = (reply or "").strip().strip('"“”')
+        if len(reply) > 40:
+            return None
         return reply or None
 
     def no_reaction_quip(self, *, identity: str, verbal_tics, topic: str,

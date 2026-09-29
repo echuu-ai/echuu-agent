@@ -43,6 +43,8 @@ from ..generators.legacy_v4 import ScriptGeneratorV4, adapt_duration_config
 from .danmaku import DanmakuEvaluator, DanmakuHandler
 from .danmaku_interleave import DanmakuInterleaver
 from .story_steerer import StorySteerer, annotate_remaining_beats
+from .topic_evolution import TopicEvolution
+from .gifts import normalize_gift
 from .llm_factory import create_llm_client
 from .performer import PerformerV3
 from .state import Danmaku, PerformanceState, PerformerMemory
@@ -96,10 +98,11 @@ def _cache_dossier(key: str, dossier: CharacterDossier) -> None:
 
 
 def _find_project_root() -> Path:
-    root = Path.cwd()
-    while root.name != "echuu-agent" and root.parent != root:
-        root = root.parent
-    return root
+    # A handoff checkout may have any name and start from backend/ or elsewhere.
+    for root in Path(__file__).resolve().parents:
+        if (root / "pyproject.toml").is_file() and (root / "workflow" / "backend").is_dir():
+            return root
+    raise RuntimeError("Cannot locate echuu project root (pyproject.toml + workflow/backend)")
 
 
 class _LLMGenerateAdapter:
@@ -152,7 +155,7 @@ class _LLMGenerateAdapter:
         finally:
             self.calls.append(call)
 
-    def call(self, prompt: str, system: str | None = None, max_tokens: int | None = None) -> str:
+    def call(self, prompt: str, system: str | None = None, max_tokens: int | None = None, response_schema=None) -> str:
         """Expose the historical V4 client contract while retaining telemetry."""
         started = perf_counter()
         token_limit = int(max_tokens or self._max_tokens)
@@ -166,7 +169,11 @@ class _LLMGenerateAdapter:
             "max_tokens": token_limit,
         }
         try:
-            response = self._client.call(prompt, system=system, max_tokens=token_limit)
+            structured = getattr(self._client, 'call_structured', None)
+            if response_schema is not None and callable(structured):
+                response = structured(prompt, system=system, max_tokens=token_limit, response_schema=response_schema)
+            else:
+                response = self._client.call(prompt, system=system, max_tokens=token_limit)
             call.update({
                 "status": "completed",
                 "response_chars": len(response or ""),
@@ -203,6 +210,10 @@ class _LLMGenerateAdapter:
             "failed_calls": sum(call.get("status") == "failed" for call in calls),
             "calls": calls,
         }
+
+
+    def call_structured(self, prompt, system=None, max_tokens=None, response_schema=None):
+        return self.call(prompt, system=system, max_tokens=max_tokens, response_schema=response_schema)
 
 
 class EchuuLiveEngine:
@@ -258,6 +269,7 @@ class EchuuLiveEngine:
         self.danmaku_handler = DanmakuHandler(DanmakuEvaluator())
         self.danmaku_interleaver = DanmakuInterleaver(self.llm_gen)
         self.story_steerer = StorySteerer(self.llm_gen)
+        self.topic_evolution = TopicEvolution(self.llm_gen)
         self.on_steering = None
         self.on_token_hunt = None
         self.performer = PerformerV3(self.llm, self.tts, self.danmaku_handler)
@@ -920,7 +932,7 @@ class EchuuLiveEngine:
             print(f"正在录制... (输出格式: {'MP3' if convert_to_mp3 else 'WAV'})")
         print(f"{'='*60}\n")
 
-        # 弹幕穿插的节奏控制：每讲完一行后可能插一条回应（冷却+每单元上限）
+        # 每讲完一行处理一条互动，已播文本与尚未播出的续写分开维护。
         lines_since_resp = 0
         resp_in_unit = 0
         last_unit_idx = -1
@@ -951,9 +963,18 @@ class EchuuLiveEngine:
             if ev["line"]["is_rupture"] and is_first_chunk:
                 print(f"  💥 rupture_kind={ev['unit']['rupture_kind']}")
 
+            self._remember_spoken(ev.get("speech", ""), ev["line"]["id"], "story")
             yield ev
             if not is_last_chunk:
-                continue  # 行没播完不计弹幕冷却、不判停
+                background = getattr(self, "background_interactions", None)
+                if background is not None:
+                    # A breath-group end is already a sentence boundary. The
+                    # short reply need not wait for the rest of this script line.
+                    reply = background.boundary(unit_idx, commit_allowed=False)
+                    if reply is not None:
+                        self.state.current_step += 1
+                        yield reply
+                continue  # Never rewrite the remaining chunks of the current line.
             lines_since_resp += 1
             self.state.lines_since_tangent = getattr(self.state, "lines_since_tangent", 99) + 1
             self._maybe_release_tangent_card()
@@ -970,11 +991,20 @@ class EchuuLiveEngine:
             if self.state.current_step >= max_steps:
                 break
 
-            # 自然断点：穿插一条弹幕回应（常规：冷却 ≥2 行、每单元 ≤1 条；
-            # 互动窗口内：冷却减半、每单元上限翻倍）
+            background = getattr(self, "background_interactions", None)
+            if background is not None:
+                resp_ev = background.boundary(unit_idx)
+                if resp_ev is not None:
+                    self.state.current_step += 1
+                    yield resp_ev
+                    # The reply itself gives preparation more time without silence.
+                    background.boundary(unit_idx, reply_allowed=False)
+                continue
+
+            # 自然断点：每讲完一行处理一条，互动之间保留正文。
             in_window = interact_window > 0
-            cooldown_ok = lines_since_resp >= (1 if in_window else 2)
-            quota_ok = resp_in_unit < (2 if in_window else 1)
+            cooldown_ok = lines_since_resp >= 1
+            quota_ok = True  # 一行结束最多处理一条，不再等待跨单元
             has_tangent = any(getattr(d, "kind", "") == "tangent" for d in self.state.danmaku_queue)
             if self.state.danmaku_queue and (has_tangent or (cooldown_ok and quota_ok)):
                 resp_ev = self._maybe_interleave_danmaku(unit_idx, last_line_text)
@@ -1007,6 +1037,33 @@ class EchuuLiveEngine:
 
         print(f"\n{'='*60}\n表演结束！\n{'='*60}\n")
 
+    def prepare_show_audio(self, on_progress=None):
+        """Prepare speech without consuming lines, memory, or interaction queues."""
+        from dataclasses import asdict
+        from .tts_instruction import build_instruction
+        from .breath import chunk_text
+        futures = []
+        for unit in self.state.show.units:
+            self.tts.update_session(**asdict(unit.acoustic))
+            for line in unit.lines:
+                self.tts.set_instruction(build_instruction(unit, line))
+                for chunk in chunk_text(line.text) or [line.text]:
+                    text = sanitize_audience_text(
+                        chunk, source_material=getattr(self, "_source_material", None),
+                        tuning_guidance=getattr(self, "tuning_guidance", None),
+                    ).text
+                    futures.append(self.tts.prepare(text))
+        try:
+            for index, future in enumerate(futures):
+                if not future.result():
+                    raise RuntimeError("语音预生成失败，请重试")
+                if on_progress:
+                    on_progress(f"正在准备语音 {index + 1}/{len(futures)}")
+        except Exception:
+            self.tts.close_preparation()
+            raise
+        return len(futures)
+
     def _render_show(self):
         """Iterate through Show.units, switching acoustic per unit.
 
@@ -1030,9 +1087,18 @@ class EchuuLiveEngine:
                     )
                     chunk = safe.text
                     try:
-                        audio = self.tts.synthesize(chunk)
-                    except Exception:
-                        audio = None
+                        prepared = getattr(self, "_interaction_audio", {})
+                        key = (line.id, ci, chunk)
+                        if key in prepared:
+                            audio = prepared.pop(key)
+                            if getattr(self.tts, "_recording", False) and audio:
+                                self.tts._recording_buffer.append(audio)
+                        else:
+                            audio = self.tts.synthesize(chunk)
+                    except Exception as exc:
+                        raise RuntimeError("本句语音生成失败，请重试直播") from exc
+                    if self.tts.enabled and not audio:
+                        raise RuntimeError("本句语音生成失败，请重试直播")
                     ev = self._build_step_event(
                         unit, line_in_unit, line, audio,
                         text=chunk, chunk_index=ci, chunk_last=(ci == len(chunks) - 1),
@@ -1051,12 +1117,9 @@ class EchuuLiveEngine:
         """
         from dataclasses import asdict as _asdict
         speech = text if text is not None else line.text
+        # The browser already inserts a short breath. Do not add 5–10 seconds
+        # of artificial silence at interaction points or unit endings.
         pause_after = 0.0
-        if chunk_last:
-            if line.stage == "interact":
-                pause_after = round(random.uniform(6.0, 10.0), 1)
-            elif line_in_unit == len(unit.lines) - 1:
-                pause_after = round(random.uniform(5.0, 8.0), 1)
         tokens = []
         if chunk_index == 0:
             from echuu.live.story_tokens import extract_tokens_from_line
@@ -1069,6 +1132,9 @@ class EchuuLiveEngine:
             "type": "step",
             "tokens": tokens,
             "show": {
+                "current_topic": getattr(self.state, "topic", getattr(self.state.show, "topic", "")),
+                "initial_topic": getattr(self.state, "initial_topic", "") or getattr(self.state, "topic", ""),
+                "topic_history": getattr(self.state, "topic_history", []),
                 "total_units": len(self.state.show.units),
                 "total_lines": sum(len(u.lines) for u in self.state.show.units),
             },
@@ -1200,10 +1266,11 @@ class EchuuLiveEngine:
 
     @guard_steering
     def _steer_remaining_show(self, dm) -> str:
-        """改还没讲的走向：挂 beats + 重写下一句。失败不挡当场回应。"""
+        """普通互动决定回应/补充/新话题；支线卡保留原有分支/回归语义。"""
         show = getattr(self.state, "show", None)
         if show is None:
             return "已记下"
+        normalize_gift(dm)
         trigger = dm.text
         kind = getattr(dm, "kind", "chat")
         if kind == "gift":
@@ -1211,11 +1278,14 @@ class EchuuLiveEngine:
         if kind == "tangent":
             from echuu.live.story_tokens import compose_tangent_text
             trigger = compose_tangent_text(getattr(dm, "entities", None) or [])
-        if getattr(show, "story_core", None) is not None:
+        if kind == "tangent" and getattr(show, "story_core", None) is not None:
             show.story_core = annotate_remaining_beats(show.story_core, trigger)
         upcoming = self._upcoming_script_lines()
         if not upcoming:
-            return "已记下，后面会接住"
+            dm.action, dm.story_changed = "reply", False
+            dm.current_topic = self.state.topic
+            dm.outcome = "accepted"
+            return "仅回应：本场已无后续台词"
         core = getattr(show, "story_core", None)
         spine = getattr(core, "spine", "") if core else ""
         if kind == "tangent":
@@ -1248,19 +1318,98 @@ class EchuuLiveEngine:
                     upcoming[1][2].text = back
                     notes.append("回主线")
             return " · ".join(notes) if notes else "沿着线索讲一小段再回来"
-        _, _, line = upcoming[0]
-        rewritten = self.story_steerer.rewrite_line(
-            spine=spine,
-            topic=self.state.topic,
-            user=dm.user,
-            trigger=trigger,
-            kind=kind,
-            line=getattr(line, "text", "") or "",
+        return self._evolve_topic(dm, upcoming)
+
+    def _remember_spoken(self, text, line_id, kind):
+        history = list(getattr(self.state, "spoken_history", []) or [])
+        history.append({"id": line_id, "text": text, "kind": kind})
+        self.state.spoken_history = history[-200:]
+
+    def _evolve_topic(self, dm, upcoming):
+        from dataclasses import asdict, is_dataclass, replace
+        st = self.state
+        show = st.show
+        if not getattr(st, "initial_topic", ""):
+            st.initial_topic = st.topic
+        dm.action, dm.story_changed = "reply", False
+        dm.previous_topic = dm.current_topic = st.topic
+        dm.outcome = "fallback"
+        dm.reason = "改写未完成，保留当前话题和原稿"
+        if len(upcoming) < 2:
+            dm.outcome = "accepted"
+            dm.reason = "临近结束，仅回应观众"
+            return dm.reason
+        source = getattr(self, "_source_material", None)
+        if is_dataclass(source):
+            source = asdict(source)
+        card = getattr(self, "persona_card", None)
+        if is_dataclass(card):
+            card = asdict(card)
+        persona = getattr(show, "persona", None)
+        if is_dataclass(persona):
+            persona = asdict(persona)
+        context = {
+            "character_name": getattr(st, "name", ""),
+            "persona": getattr(st, "persona", "") or persona,
+            "persona_card": card,
+            "background": getattr(st, "background", ""),
+            "initial_topic": st.initial_topic,
+            "current_topic": st.topic,
+            "direction": getattr(getattr(show, "story_core", None), "spine", st.topic),
+            "topic_history": getattr(st, "topic_history", []),
+            "spoken_history": getattr(st, "spoken_history", []),
+            "recent_interactions": getattr(st, "interaction_history", []),
+            "committed_bridge": getattr(self, "_committed_bridge", []),
+            "source_material": source,
+        }
+        evolution = getattr(self, "topic_evolution", None)
+        if evolution is None:
+            return dm.reason
+        plan = evolution.propose(
+            context=context, interaction=dm.to_public(),
+            lines=[{"id": line.id, "text": line.text} for _, _, line in upcoming],
         )
-        if rewritten:
-            line.text = rewritten
-            return rewritten[:48]
-        return "后续会往观众推的方向收"
+        dm.decision_trace = list(getattr(evolution, "decision_trace", []))
+        if plan is None:
+            dm.reason = "未采用：" + (getattr(evolution, "failure_reason", "") or "未获得有效续写")
+            return dm.reason
+        dm.action, dm.reason = plan.action, plan.reason
+        dm.outcome = "accepted"
+        if plan.action == "reply":
+            return "仅回应：" + plan.reason
+        # Validate every spoken line before touching either text or topic state.
+        cleaned = []
+        for _, text in plan.lines:
+            safe = sanitize_audience_text(
+                text, source_material=getattr(self, "_source_material", None),
+                tuning_guidance=getattr(self, "tuning_guidance", None),
+            ).text
+            if not safe.strip():
+                dm.action, dm.outcome = "reply", "fallback"
+                return "改写内容未通过检查，保留原稿"
+            cleaned.append(safe)
+        for (_, _, line), text in zip(upcoming, cleaned):
+            line.text = text
+            # Old cues/key_info refer to the old script and must not leak back in.
+            line.cue = None
+            line.key_info = []
+            line.is_rupture = False
+        previous = st.topic
+        st.topic = show.topic = plan.topic
+        core = getattr(show, "story_core", None)
+        if core is not None:
+            show.story_core = replace(
+                core, spine=plan.direction, story_beats=(plan.direction,),
+                core_struggle="", supporting_points=(), twist="", central_contrast="",
+                punchline_seeds=(), hook_angle="",
+            )
+        entry = {"action": plan.action, "from_topic": previous, "topic": plan.topic,
+                 "direction": plan.direction, "reason": plan.reason, "interaction_id": dm.id}
+        st.topic_history = [*getattr(st, "topic_history", []), entry][-12:]
+        dm.story_changed = True
+        dm.current_topic = plan.topic
+        label = "转入相关话题" if plan.action == "transition" else "展开当前话题"
+        return f"{label}：{plan.topic}；已更新剩余{len(cleaned)}句"
 
     def _maybe_interleave_danmaku(self, unit_idx: int, last_line: str):
         """生成一条人设化弹幕回应并构造 step 事件；失败返回 None（跳过穿插）。"""
@@ -1282,6 +1431,9 @@ class EchuuLiveEngine:
             last_line=last_line, danmaku_text=dm.text, user=dm.user,
             card=getattr(self, "persona_card", None),
             gags=self.gag_ledger.unrecalled() if getattr(self, "gag_ledger", None) else None,
+            evolution={"action": dm.action, "topic": self.state.topic, "reason": dm.reason,
+                       "gift_name": dm.gift_name, "gift_category": dm.gift_category,
+                       "recent_spoken": getattr(self.state, "spoken_history", [])[-8:]},
         )
         if not reply:
             user = (getattr(dm, "user", "") or "你").strip() or "你"
@@ -1292,6 +1444,17 @@ class EchuuLiveEngine:
             source_material=getattr(self, "_source_material", None),
             tuning_guidance=getattr(self, "tuning_guidance", None),
         ).text
+        evolution = getattr(self, "topic_evolution", None)
+        if evolution is not None and not evolution.approve_reply(reply, context={
+            "current_topic": self.state.topic,
+            "persona": getattr(self.state, "persona", identity),
+            "background": getattr(self.state, "background", ""),
+            "source_material": getattr(self, "_source_material", None),
+            "spoken_history": getattr(self.state, "spoken_history", []),
+            "topic_history": getattr(self.state, "topic_history", []),
+        }, interaction=dm.to_public()):
+            # A neutral acknowledgment adds no new biography, preference or promise.
+            reply = f"谢谢你的{dm.gift_name}，我接着聊。" if dm.gift_name else "看到你的消息了，我接着聊。"
         if not approve_reply(self, reply):
             return None
         try:
@@ -1300,6 +1463,14 @@ class EchuuLiveEngine:
             audio = None
         unit = self.state.show.units[unit_idx]
         event = self._build_danmaku_event(unit, dm, reply, audio)
+        self._remember_spoken(reply, "reply-" + dm.id, "reply")
+        self.state.interaction_history = [*getattr(self.state, "interaction_history", []), {
+            "id": dm.id, "user": dm.user, "text": dm.text, "action": dm.action,
+            "outcome": dm.outcome, "story_changed": dm.story_changed,
+            "disposition": "adopted" if dm.story_changed else "not_adopted" if dm.outcome in ("fallback", "rejected") else "responded",
+            "pending": False, "reason": dm.reason,
+            "topic": self.state.topic, "reply": reply,
+        }][-12:]
         self.emit_steering(dm, "replied")
         return event
 

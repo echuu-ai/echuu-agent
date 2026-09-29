@@ -1,5 +1,4 @@
-"""思考停顿：step 事件带 pause_after——interact 行等观众 6-10s，unit 收尾行 5-8s，
-其余为 0（换气间隙由前端 breathGapMs 负责）。"""
+"""Playback has a short browser breath, never a forced 5–10 second pause."""
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,24 +16,24 @@ def _engine_with_unit(lines):
     return eng, unit
 
 
-def test_interact_line_pauses_6_to_10s():
+def test_interact_line_has_no_forced_wait():
     lines = [
         ScriptLine(id="l0", text="铺垫", stage="pad"),
         ScriptLine(id="l1", text="你们选1还是2？", stage="interact"),
     ]
     eng, unit = _engine_with_unit(lines)
     ev = eng._build_step_event(unit, 1, lines[1], None)
-    assert 6.0 <= ev["pause_after"] <= 10.0
+    assert ev["pause_after"] == 0.0
 
 
-def test_unit_last_line_pauses_5_to_8s():
+def test_unit_last_line_has_no_forced_wait():
     lines = [
         ScriptLine(id="l0", text="铺垫", stage="pad"),
         ScriptLine(id="l1", text="收尾", stage="turn"),
     ]
     eng, unit = _engine_with_unit(lines)
     ev = eng._build_step_event(unit, 1, lines[1], None)
-    assert 5.0 <= ev["pause_after"] <= 8.0
+    assert ev["pause_after"] == 0.0
 
 
 def test_mid_unit_line_no_extra_pause():

@@ -31,6 +31,15 @@ class Danmaku:
     kind: str = "chat"  # chat | gift | tangent | collect
     entities: list = field(default_factory=list)
     gift_id: str = ""
+    gift_name: str = ""
+    gift_category: str = ""
+    action: str = "reply"
+    story_changed: bool = False
+    current_topic: str = ""
+    previous_topic: str = ""
+    reason: str = ""
+    outcome: str = ""
+    decision_trace: list = field(default_factory=list)
     client_id: str = ""
     status: str = "queued"  # queued | processing | applied | replied | dropped
 
@@ -74,7 +83,8 @@ class Danmaku:
         elif amount > 0:
             parsed.amount = amount
             parsed.is_sc = True
-        return parsed
+        from .gifts import normalize_gift
+        return normalize_gift(parsed)
 
     def to_public(self) -> Dict:
         """WS / REST 上给前端的排队状态。"""
@@ -83,6 +93,15 @@ class Danmaku:
             "client_id": self.client_id,
             "kind": self.kind,
             "gift_id": self.gift_id,
+            "gift_name": self.gift_name,
+            "gift_category": self.gift_category,
+            "action": self.action,
+            "story_changed": self.story_changed,
+            "current_topic": self.current_topic,
+            "previous_topic": self.previous_topic,
+            "reason": self.reason,
+            "outcome": self.outcome,
+            "decision_trace": self.decision_trace,
             "text": self.text,
             "user": self.user,
             "status": self.status,
@@ -378,3 +397,7 @@ class PerformanceState:
     catchphrases: List[str] = field(default_factory=list)
     lines_since_tangent: int = 99
     token_hunt: object | None = None
+    initial_topic: str = ""
+    topic_history: List[Dict] = field(default_factory=list)
+    spoken_history: List[Dict] = field(default_factory=list)
+    interaction_history: List[Dict] = field(default_factory=list)

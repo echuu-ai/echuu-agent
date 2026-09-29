@@ -1,3 +1,7 @@
+[启动、输入输出与给扣扣的互动说明](docs/KOKO_HANDOFF.md) · [服务端提示词原文](docs/INTERACTION_PROMPTS.md)
+
+> 2026-09-29 话题演变预研：饭团语义、持续转话题与启动方式见 [交接说明](docs/topic-evolution.md)。
+
 # echuu-agent
 
 AI VTuber 自动直播系统 - 从真实主播切片中学习表演模式，生成自然的多语言直播内容。

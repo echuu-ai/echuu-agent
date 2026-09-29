@@ -27,7 +27,7 @@ class LLMClient:
         else:
             raise ValueError("未设置 ANTHROPIC_API_KEY，无法使用真实模式")
 
-    def call(self, prompt: str, system: Optional[str] = None, max_tokens: int = 1000) -> str:
+    def call(self, prompt: str, system: Optional[str] = None, max_tokens: int = 1000, response_schema=None) -> str:
         """调用 LLM。"""
         if self.client:
             try:
@@ -36,9 +36,15 @@ class LLMClient:
                     "max_tokens": max_tokens,
                     "messages": [{"role": "user", "content": prompt}],
                 }
+                if self.model.startswith("claude-sonnet-5"):
+                    kwargs["thinking"] = {"type": "disabled"}
+                if response_schema is not None:
+                    kwargs["output_config"] = {"format": {"type": "json_schema", "schema": response_schema}}
                 if system:
                     kwargs["system"] = system
                 response = self.client.messages.create(**kwargs)
+                if getattr(response, "stop_reason", None) == "max_tokens":
+                    raise RuntimeError("Claude output truncated at max_tokens; no partial script accepted")
                 text = "".join(block.text for block in response.content if getattr(block, "type", None) == "text")
                 if not text.strip():
                     raise RuntimeError("Claude response contains no text blocks")
@@ -46,3 +52,6 @@ class LLMClient:
             except Exception as exc:
                 raise RuntimeError(f"LLM 调用失败: {exc}") from exc
         raise RuntimeError("LLM 未初始化，无法调用")
+
+    def call_structured(self, prompt, system=None, max_tokens=3000, response_schema=None):
+        return self.call(prompt, system=system, max_tokens=max_tokens, response_schema=response_schema)

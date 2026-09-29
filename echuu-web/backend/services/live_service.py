@@ -58,6 +58,11 @@ def _dump_session_memory(engine, character_name: str, session_dir: Path) -> None
         memory = engine.state.memory
         payload = {
             "name": character_name,
+            "initial_topic": getattr(engine.state, "initial_topic", "") or engine.state.topic,
+            "current_topic": engine.state.topic,
+            "topic_history": getattr(engine.state, "topic_history", []),
+            "spoken_history": getattr(engine.state, "spoken_history", []),
+            "interaction_history": getattr(engine.state, "interaction_history", []),
             "story_points": memory.story_points.get("mentioned", []),
             "promises": [p for p in memory.promises if not p.get("fulfilled")],
         }
@@ -374,87 +379,94 @@ class LiveService:
                 bcast(payload), main_loop,
             )
 
+            generation_active = True
+
             def on_phase(msg: str):
+                if not generation_active:
+                    return
                 asyncio.run_coroutine_threadsafe(
                     bcast({"type": "reasoning", "content": msg}),
                     main_loop,
                 )
 
-            # ============ 预生产阶段：opening 与主体并行，按模式产出事件 ============
-            from itertools import chain
-            from echuu.modes.rundown import produce_opening_events, produce_closing_events
-            from echuu.modes.topic_brief import produce_topic_brief, merge_brief_into_background
-            from echuu.core.persona_card import PersonaCard
-            from echuu.live.tts_client import TTSClient
+            # Bound preparation only; the live performance may last longer.
+            preparation_deadline = main_loop.time() + float(os.getenv('ECHUU_GENERATION_TIMEOUT', '40'))
+            async with asyncio.timeout_at(preparation_deadline):
+                # ============ 预生产阶段：opening 与主体并行，按模式产出事件 ============
+                from itertools import chain
+                from echuu.modes.rundown import produce_opening_events, produce_closing_events
+                from echuu.modes.topic_brief import produce_topic_brief, merge_brief_into_background
+                from echuu.core.persona_card import PersonaCard
+                from echuu.live.tts_client import TTSClient
 
-            loop = main_loop
-            card = PersonaCard.from_dict(persona_card)
+                loop = main_loop
+                card = PersonaCard.from_dict(persona_card)
 
-            current_background = background
-            background = f"【本次用户设定·故事前提】{background}\n本次主题：{topic}\n以下参考不能推翻本次故事前提；涉及现实未发生之事时按本次虚构情境讲述，不改成假货、做梦或没有发生。"
+                current_background = background
+                background = f"【本次用户设定·故事前提】{background}\n本次主题：{topic}\n保留用户人设与明确虚构设定；现实产品和新闻若与最新有来源的事实冲突，应更正旧背景，不得默认把真实事件当成虚构。"
 
-            # 上一场记忆注入：同角色最近一次 session 的记忆摘要 →"上次说过…"是天然跨场 call-back
-            prev_memory = _load_prev_memory_summary(character_name, exclude_session=session_id)
-            if prev_memory:
-                background = f"{background}\n\n【历史记忆·低于本次设定，不能作为本次新经历】{prev_memory}" if background else \
-                    f"【历史记忆·低于本次设定，不能作为本次新经历】{prev_memory}"
-                on_phase("已载入上一场直播的记忆")
+                # 上一场记忆注入：同角色最近一次 session 的记忆摘要 →"上次说过…"是天然跨场 call-back
+                prev_memory = _load_prev_memory_summary(character_name, exclude_session=session_id)
+                if prev_memory:
+                    background = f"{background}\n\n【历史记忆·低于本次设定，不能作为本次新经历】{prev_memory}" if background else \
+                        f"【历史记忆·低于本次设定，不能作为本次新经历】{prev_memory}"
+                    on_phase("已载入上一场直播的记忆")
 
-            # 主题语义 grounding：联网确认网络流行语的真实用法（如"云养猫"），
-            # 结果注入 background，opening 与三模式主体共享。失败/不支持时为空，不阻塞。
-            on_phase("正在联网确认主题语义…")
-            topic_brief = await loop.run_in_executor(
-                None, lambda: produce_topic_brief(engine.llm, topic),
-            )
-            background = merge_brief_into_background(background, topic, topic_brief)
-            if topic_brief:
-                on_phase(f"主题背景已就绪：{topic_brief[:48]}…")
-            # rundown 用独立 TTS client：与主体预生产并行跑，共享 client 的
-            # set_instruction 会串音
-            rundown_tts = TTSClient()
+                # 主题语义 grounding：联网确认网络流行语的真实用法（如"云养猫"），
+                # 结果注入 background，opening 与三模式主体共享。失败/不支持时为空，不阻塞。
+                on_phase("正在核实主题最新事实与来源…")
+                topic_brief = await loop.run_in_executor(
+                    None, lambda: produce_topic_brief(engine.llm, topic),
+                )
+                background = merge_brief_into_background(background, topic, topic_brief)
+                if topic_brief:
+                    on_phase(f"主题背景已就绪：{topic_brief[:48]}…")
+                # rundown 用独立 TTS client：与主体预生产并行跑，共享 client 的
+                # set_instruction 会串音
+                rundown_tts = TTSClient()
 
-            def produce_opening_safe():
-                try:
-                    return produce_opening_events(
-                        engine, character_name, persona, topic, mode,
-                        on_phase=on_phase, tts=rundown_tts, card=card, background=current_background,
+                def produce_opening_safe():
+                    try:
+                        return produce_opening_events(
+                            engine, character_name, persona, topic, mode,
+                            on_phase=on_phase, tts=rundown_tts, card=card, background=merge_brief_into_background(current_background, topic, topic_brief),
+                        )
+                    except Exception as exc:  # opening 失败不阻塞开播
+                        print(f"[rundown] opening 生成失败（跳过）: {exc}")
+                        return []
+
+                if mode == "reaction":
+                    from echuu.modes.reaction import produce_reaction_events
+                    opening_events, events = await asyncio.gather(
+                        loop.run_in_executor(None, produce_opening_safe),
+                        loop.run_in_executor(
+                            None,
+                            lambda: produce_reaction_events(
+                                engine, character_name, persona, background, topic,
+                                source or {}, on_phase=on_phase,
+                            ),
+                        ),
                     )
-                except Exception as exc:  # opening 失败不阻塞开播
-                    print(f"[rundown] opening 生成失败（跳过）: {exc}")
-                    return []
-
-            if mode == "reaction":
-                from echuu.modes.reaction import produce_reaction_events
-                opening_events, events = await asyncio.gather(
-                    loop.run_in_executor(None, produce_opening_safe),
-                    loop.run_in_executor(
-                        None,
-                        lambda: produce_reaction_events(
-                            engine, character_name, persona, background, topic,
-                            source or {}, on_phase=on_phase,
+                    generator = iter(events)
+                elif mode == "singing_learn":
+                    from echuu.modes.singing import produce_singing_events
+                    opening_events, events = await asyncio.gather(
+                        loop.run_in_executor(None, produce_opening_safe),
+                        loop.run_in_executor(
+                            None,
+                            lambda: produce_singing_events(
+                                engine, character_name, persona, background, topic,
+                                source or {}, session_dir, on_phase=on_phase,
+                            ),
                         ),
-                    ),
-                )
-                generator = iter(events)
-            elif mode == "singing_learn":
-                from echuu.modes.singing import produce_singing_events
-                opening_events, events = await asyncio.gather(
-                    loop.run_in_executor(None, produce_opening_safe),
-                    loop.run_in_executor(
-                        None,
-                        lambda: produce_singing_events(
-                            engine, character_name, persona, background, topic,
-                            source or {}, session_dir, on_phase=on_phase,
-                        ),
-                    ),
-                )
-                generator = iter(events)
-            else:
-                # storytelling（默认）：现有引擎路径，保留弹幕实时穿插
-                # engine.state 要等 setup() 之后才存在，弹幕必须在 setup 完成后注入
-                opening_events, _ = await asyncio.gather(
-                    loop.run_in_executor(None, produce_opening_safe),
-                    loop.run_in_executor(
+                    )
+                    generator = iter(events)
+                else:
+                    # storytelling（默认）：现有引擎路径，保留弹幕实时穿插
+                    # engine.state 要等 setup() 之后才存在，弹幕必须在 setup 完成后注入
+                    from echuu.modes.preparation import wait_for_script
+                    opening_future = loop.run_in_executor(None, produce_opening_safe)
+                    body_future = loop.run_in_executor(
                         None,
                         lambda: engine.setup(
                             name=character_name,
@@ -464,34 +476,55 @@ class LiveService:
                             on_phase_callback=on_phase,
                             persona_card=persona_card,
                         ),
-                    ),
-                )
-                for dm_text in (initial_danmaku or []):
-                    dm = Danmaku.from_text(dm_text, user="观众")
-                    engine.state.danmaku_queue.append(dm)
+                    )
+                    # Reserve time for ready: optional greeting audio must not
+                    # throw away a complete script when TTS is slow.
+                    opening_events = await wait_for_script(
+                        body_future, opening_future,
+                        deadline=preparation_deadline,
+                    )
+                    if not opening_events:
+                        on_phase("正文已就绪，直接进入主题")
+                    for dm_text in (initial_danmaku or []):
+                        dm = Danmaku.from_text(dm_text, user="观众")
+                        engine.state.danmaku_queue.append(dm)
 
-                # 复制剧本到 session 目录
-                script_sources = sorted(engine.scripts_dir.glob("*.json"), key=os.path.getmtime)
-                if script_sources:
-                    shutil.copy(script_sources[-1], session_dir / "full_script.json")
+                    # 复制剧本到 session 目录
+                    script_sources = sorted(engine.scripts_dir.glob("*.json"), key=os.path.getmtime)
+                    if script_sources:
+                        shutil.copy(script_sources[-1], session_dir / "full_script.json")
 
-                # 落盘人物小传（供回看/评测；失败不阻塞）
+                    # 落盘人物小传（供回看/评测；失败不阻塞）
+                    try:
+                        if getattr(engine, "dossier", None):
+                            import json as _json
+                            from dataclasses import asdict as _asdict
+                            (session_dir / "dossier.json").write_text(
+                                _json.dumps(_asdict(engine.dossier), ensure_ascii=False, indent=2),
+                                encoding="utf-8",
+                            )
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"[dossier] 落盘失败（跳过）: {exc}")
+
+                    from echuu.live.background_interactions import BackgroundInteractions
+                    engine.background_interactions = BackgroundInteractions(engine)
+                    generator = engine.run(max_steps=max_steps, play_audio=False, save_audio=True)
+
+                # 开场段先播（stage='opening'，前端按 stage 走 sequential 通道）
+                generator = chain(opening_events, generator)
+
+            if mode == "storytelling":
+                on_phase("剧本已就绪，正在预生成原稿语音…")
                 try:
-                    if getattr(engine, "dossier", None):
-                        import json as _json
-                        from dataclasses import asdict as _asdict
-                        (session_dir / "dossier.json").write_text(
-                            _json.dumps(_asdict(engine.dossier), ensure_ascii=False, indent=2),
-                            encoding="utf-8",
-                        )
-                except Exception as exc:  # noqa: BLE001
-                    print(f"[dossier] 落盘失败（跳过）: {exc}")
-
-                generator = engine.run(max_steps=max_steps, play_audio=False, save_audio=True)
-
-            # 开场段先播（stage='opening'，前端按 stage 走 sequential 通道）
-            generator = chain(opening_events, generator)
-
+                    await asyncio.wait_for(
+                        asyncio.to_thread(engine.prepare_show_audio, on_phase), timeout=60,
+                    )
+                except TimeoutError as exc:
+                    # Provider connection timeouts and the preparation deadline
+                    # are speech failures, not script generation failures.
+                    raise RuntimeError("语音服务连接或预生成超时，请重试") from exc
+                on_phase("原稿语音已就绪，互动只重生成改写的句子")
+            generation_active = False
             await bcast({
                 "type": "ready",
                 "content": f"剧本已生成，Session: {session_id}",
@@ -512,8 +545,13 @@ class LiveService:
 
             # ============ 表演阶段：统一事件循环 ============
             step_idx = 0
-            for result in generator:
-                if state.stop_requested:
+            opening_reply = None
+            while not state.stop_requested:
+                if opening_reply is not None:
+                    result, opening_reply = opening_reply, None
+                else:
+                    result = await asyncio.to_thread(next, generator, None)
+                if result is None or state.stop_requested:
                     break
 
                 spoken_for = await emit_step(result, step_idx)
@@ -524,6 +562,8 @@ class LiveService:
                     await bcast({
                         "type": "memory",
                         "memory": {
+                            "current_topic": engine.state.topic,
+                            "topic_history": getattr(engine.state, "topic_history", []),
                             "story_points": memory.story_points.get("mentioned", []),
                             "promises": [p for p in memory.promises if not p.get("fulfilled")],
                             "emotion_trend": [e["level"] for e in memory.emotion_track[-5:]],
@@ -532,16 +572,27 @@ class LiveService:
 
                 step_idx += 1
                 # 跟着台词时长走，留一点余量给前端排队，但不要整场提前演完。
-                await asyncio.sleep(max(0.2, (spoken_for or 1.2) * 0.92))
+                playback_until = loop.time() + max(0.2, (spoken_for or 1.2) * 0.92)
+                while not state.stop_requested and loop.time() < playback_until:
+                    background = getattr(engine, "background_interactions", None)
+                    if background is not None:
+                        background.tick()
+                    await asyncio.sleep(min(0.1, max(0, playback_until - loop.time())))
+                if result.get("stage") == "opening" and getattr(engine, "background_interactions", None):
+                    opening_reply = engine.background_interactions.boundary(0, commit_allowed=False)
 
+            background = getattr(engine, "background_interactions", None)
+            if background is not None:
+                background.close()
+            engine.accepting_interactions = False
             # ============ 收尾段：自然结束才播，用户主动 stop 跳过 ============
             if not state.stop_requested:
                 def produce_closing_safe():
                     try:
                         return produce_closing_events(
-                            engine, character_name, persona, topic, mode,
+                            engine, character_name, persona, engine.state.topic if engine.state else topic, mode,
                             on_phase=on_phase, tts=rundown_tts, card=card,
-                            background=current_background, spoken_lines=spoken_lines,
+                            background=merge_brief_into_background(current_background, topic, topic_brief), spoken_lines=spoken_lines,
                         )
                     except Exception as exc:  # closing 失败不阻塞收播
                         print(f"[rundown] closing 生成失败（跳过）: {exc}")
@@ -588,10 +639,18 @@ class LiveService:
             })
 
         except Exception as e:
+            generation_active = False
             _finish_session_record(session_id, error=str(e))
-            await bcast({"type": "error", "content": str(e)})
+            await bcast({"type": "error", "content": "剧本生成超时，请重试" if isinstance(e, TimeoutError) else str(e)})
             print(traceback.format_exc())
         finally:
+            for tts_owner in (locals().get("engine"),):
+                if tts_owner and getattr(tts_owner, "background_interactions", None):
+                    tts_owner.background_interactions.close()
+                if tts_owner and getattr(tts_owner, "tts", None):
+                    tts_owner.tts.close_preparation()
+            if locals().get("rundown_tts"):
+                rundown_tts.close_preparation()
             state.is_running = False
             state.clear_engine()
 
@@ -803,7 +862,7 @@ class LiveService:
                 live_session.archive_status = "failed"
                 live_session.archive_error = str(e)[:2000]
                 db.commit()
-            await bcast({"type": "error", "content": str(e)})
+            await bcast({"type": "error", "content": "剧本生成超时，请重试" if isinstance(e, TimeoutError) else str(e)})
             print(traceback.format_exc())
 
             if live_session:
@@ -835,6 +894,8 @@ class LiveService:
             raise ValueError("直播未运行")
 
         engine = state.current_engine
+        if not getattr(engine, "accepting_interactions", True):
+            raise ValueError("直播正在收尾，已停止接收互动")
         if not getattr(engine, "state", None):
             raise ValueError("直播尚未就绪")
 

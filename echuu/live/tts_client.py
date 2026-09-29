@@ -8,6 +8,9 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import copy
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 
@@ -68,6 +71,9 @@ class TTSClient:
         self._recording = False
         self._recording_buffer = []
         self.tts = None
+        self._prepared = {}
+        self._prepare_lock = threading.Lock()
+        self._prepare_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="speech-prepare")
 
         api_key = os.getenv("DASHSCOPE_API_KEY")
         if not api_key:
@@ -164,6 +170,49 @@ class TTSClient:
         except Exception as exc:
             print(f"[TTS] set_instruction failed: {exc}")
 
+    def fork_preparation(self):
+        """Independent voice settings and worker pool; never touch the live recorder."""
+        clone = copy.copy(self)
+        clone.tts = copy.copy(self.tts)
+        clone._recording = False
+        clone._recording_buffer = []
+        clone._prepared = {}
+        clone._prepare_lock = threading.Lock()
+        clone._prepare_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="interaction-speech")
+        return clone
+
+    def prepare(self, text: str):
+        """Cache exact text + frozen voice settings; rewritten text is a cache miss."""
+        if not self.enabled or not self.tts:
+            raise RuntimeError("TTS is unavailable")
+        voice = copy.copy(self.tts)
+        fields = ("model", "voice", "language_type", "instruction", "speech_rate",
+                  "pitch_rate", "volume", "sample_rate", "response_format", "mode", "bit_rate", "ws_url")
+        key = (text, *(getattr(voice, field, None) for field in fields))
+        with self._prepare_lock:
+            future = self._prepared.get(key)
+            if future is None:
+                future = self._prepare_pool.submit(self._generate_prepared, voice, text)
+                self._prepared[key] = future
+        return future
+
+    @staticmethod
+    def _generate_prepared(voice, text):
+        from .breath import synthesize_with_breath
+        for attempt in range(2):
+            try:
+                audio = synthesize_with_breath(voice.synthesize, text, sample_rate=voice.sample_rate)
+                if audio:
+                    return audio
+                raise RuntimeError("TTS returned no audio")
+            except Exception:
+                if attempt:
+                    raise
+        raise RuntimeError("TTS failed")
+
+    def close_preparation(self):
+        self._prepare_pool.shutdown(wait=False, cancel_futures=True)
+
     def synthesize(self, text: str, emotion_boost: float = 0.0) -> Optional[bytes]:
         """
         合成语音（带规则化喘气停顿）。
@@ -182,7 +231,7 @@ class TTSClient:
 
         sample_rate = int(os.getenv("TTS_SAMPLE_RATE", "24000"))
         try:
-            audio = synthesize_with_breath(self.tts.synthesize, text, sample_rate=sample_rate)
+            audio = self.prepare(text).result()
         except Exception as exc:
             print(f"[TTS] 合成错误: {exc}")
             return None

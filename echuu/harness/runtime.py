@@ -63,7 +63,7 @@ def trace_runtime(method):
         self._harness_runtime_store=store
         self._harness_runtime_llm=MeteredLLM(getattr(self,'llm',None),store,12)
         original_clients=[]
-        for name in ('story_steerer','danmaku_interleaver'):
+        for name in ('story_steerer','danmaku_interleaver','topic_evolution'):
             component=getattr(self,name,None)
             if component is not None and hasattr(component,'llm'):
                 original_clients.append((component,component.llm));component.llm=self._harness_runtime_llm
@@ -85,35 +85,79 @@ def trace_runtime(method):
 
 
 def guard_steering(method):
-    """Stage edits privately, review the entire resulting story, then commit or restore."""
+    """Review a proposal atomically: future script, cues, topic and history together."""
     @wraps(method)
-    def wrapped(self,*args,**kwargs):
-        if not getattr(self,'_harness_directory',None):return method(self,*args,**kwargs)
-        store=getattr(self,'_harness_runtime_store',None)
-        if store is None:return '当前故事保持原稿'
+    def wrapped(self, *args, **kwargs):
+        if not getattr(self, '_harness_directory', None):
+            return method(self, *args, **kwargs)
         from copy import deepcopy
         from .repair import run_repair
-        before=[(line,line.text) for unit in self.state.show.units for line in unit.lines]
-        core=deepcopy(self.state.show.story_core)
+        dm = args[0] if args else None
+
+        def rejected():
+            if dm is not None:
+                dm.action, dm.story_changed, dm.outcome = 'reply', False, 'rejected'
+                dm.current_topic = getattr(self.state, 'topic', '')
+                dm.reason = '改写未通过检查，保留当前话题和原稿'
+            return '已收到，继续当前话题'
+
+        store = getattr(self, '_harness_runtime_store', None)
+        if store is None:
+            return rejected()
+        lines = [line for unit in self.state.show.units for line in unit.lines]
+        state_fields = ('topic', 'initial_topic', 'topic_history')
+        show_fields = ('topic', 'story_core')
+
+        def capture():
+            return (
+                [(line, deepcopy(vars(line))) for line in lines],
+                {k: (hasattr(self.state, k), deepcopy(getattr(self.state, k, None))) for k in state_fields},
+                {k: (hasattr(self.state.show, k), deepcopy(getattr(self.state.show, k, None))) for k in show_fields},
+            )
+
+        def restore(snapshot):
+            for line, values in snapshot[0]:
+                vars(line).clear()
+                vars(line).update(deepcopy(values))
+            for target, fields in ((self.state, snapshot[1]), (self.state.show, snapshot[2])):
+                for key, (exists, value) in fields.items():
+                    if exists:
+                        setattr(target, key, deepcopy(value))
+                    elif hasattr(target, key):
+                        delattr(target, key)
+
+        before = capture()
         try:
-            note=method(self,*args,**kwargs)
-            proposed=[(line,line.text) for line,_ in before]
-        finally:
-            self.state.show.story_core=core
-            for line,text in before:line.text=text
-        if all(a[1]==b[1] for a,b in zip(before,proposed)):return note
-        text='\n'.join(t for _,t in proposed)
-        aid=store.add('runtime_steering_proposal',{'text':text,'before':[{'id':l.id,'text':t} for l,t in before]})
-        try:
-            _,_,review,rid=run_repair(text,self._harness_content['fixture'],self._harness_runtime_llm,store,aid,0)
-            accepted=review['status']=='accepted'
-        except Exception as exc:
-            rid=store.add('runtime_steering_error',{'error_type':type(exc).__name__},parents=[aid],status='failed');accepted=False
-        store.add('runtime_steering_selection',{'accepted':accepted,'action':'adopt' if accepted else 'restore'},parents=[aid,rid],status='accepted' if accepted else 'rejected')
-        if accepted:
-            for line,text in proposed:line.text=text
+            note = method(self, *args, **kwargs)
+            proposed = capture()
+        except Exception:
+            restore(before)
+            return rejected()
+        restore(before)
+        if all(a[1] == b[1] for a, b in zip(before[0], proposed[0])):
             return note
-        return '已收到，先把当前故事讲完整'
+        text = '\n'.join(values['text'] for _, values in proposed[0])
+        fixture = deepcopy(self._harness_content['fixture'])
+        fixture['original_topic'] = fixture.get('topic', '')
+        fixture['topic'] = proposed[1]['topic'][1] or fixture.get('topic', '')
+        fixture['topic_history'] = proposed[1]['topic_history'][1] or []
+        fixture['spoken_history'] = getattr(self.state, 'spoken_history', [])
+        aid = store.add('runtime_steering_proposal', {
+            'text': text, 'topic': fixture['topic'], 'topic_history': fixture['topic_history'],
+            'before': [{'id': values['id'], 'text': values['text']} for _, values in before[0]],
+        })
+        try:
+            _, _, review, rid = run_repair(text, fixture, self._harness_runtime_llm, store, aid, 0)
+            accepted = review['status'] == 'accepted'
+        except Exception as exc:
+            rid = store.add('runtime_steering_error', {'error_type': type(exc).__name__}, parents=[aid], status='failed')
+            accepted = False
+        store.add('runtime_steering_selection', {'accepted': accepted, 'action': 'adopt' if accepted else 'restore'},
+                  parents=[aid, rid], status='accepted' if accepted else 'rejected')
+        if accepted:
+            restore(proposed)
+            return note
+        return rejected()
     return wrapped
 
 
@@ -124,7 +168,11 @@ def approve_reply(engine,text):
     if store is None:return False
     from .nodes import NodeRunner,require
     from .repair import deterministic_issues,line_items
-    fixture=engine._harness_content['fixture'];lines=line_items(text)
+    fixture = dict(engine._harness_content['fixture'])
+    state = getattr(engine, 'state', None)
+    fixture['topic'] = getattr(state, 'topic', fixture.get('topic', ''))
+    fixture['topic_history'] = getattr(state, 'topic_history', [])
+    lines = line_items(text)
     aid=store.add('runtime_reply_proposal',{'text':text})
     if deterministic_issues(lines,fixture):
         store.add('runtime_reply_rejected',{'reason':'deterministic guard'},parents=[aid],status='rejected');return False
