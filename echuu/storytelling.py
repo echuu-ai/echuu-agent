@@ -1,12 +1,17 @@
 import io
+import json
 import logging
 import wave
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
+from dataclasses import asdict
+from datetime import datetime, timezone
 from time import monotonic
 
 from .config import EngineConfig
+from .gift_runtime import GiftRuntime
+from .session_extensions import SessionArtifacts
 from .session_types import (
     AudioDescriptor,
     Interaction,
@@ -43,6 +48,8 @@ class StorytellingDriver:
         self._brief = ""
         self._card = None
         self._ended = False
+        self._gift_runtime = None
+        self._original_script = None
 
     def _rundown(self, stage, tts):
         from .modes.rundown import produce_closing_events, produce_opening_events
@@ -125,7 +132,18 @@ class StorytellingDriver:
                     logger.info("Optional opening missed its deadline")
         finally:
             opening_pool.shutdown(wait=False)
+        self._original_script = json.loads(
+            json.dumps(asdict(e.state.show), default=str)
+        )
+        self._original_script["metadata"] = {
+            "timestamp": datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S"),
+            "name": value.name,
+            "topic": value.topic,
+            "total_units": len(e.state.show.units),
+            "total_lines": sum(len(unit.lines) for unit in e.state.show.units),
+        }
         e.background_interactions = BackgroundInteractions(e)
+        self._gift_runtime = GiftRuntime(e)
         # Render lazily: one prepared step at a time, never enqueue an entire show.
         # Rewrites retain the existing exact-text preparation/commit mechanism.
         self._generator = e.run(
@@ -159,6 +177,9 @@ class StorytellingDriver:
             item = next(self._closing, None)
         if item is None:
             return None
+        return self._step(item)
+
+    def _step(self, item):
         self._index += 1
         payload = dict(item)
         data = payload.pop("audio", None)
@@ -183,6 +204,46 @@ class StorytellingDriver:
             audio=descriptor,
             audio_data=data,
         )
+
+    def export_artifacts(self):
+        state = self.engine.state
+        dossier = getattr(self.engine, "dossier", None)
+        return SessionArtifacts(
+            script=self._original_script,
+            dossier=json.loads(json.dumps(asdict(dossier), default=str))
+            if dossier
+            else None,
+            memory={
+                "current_topic": state.topic,
+                "candidate_promises": json.loads(
+                    json.dumps(
+                        getattr(getattr(state, "memory", None), "promises", []),
+                        default=str,
+                    )
+                ),
+                "topic_history": json.loads(
+                    json.dumps(getattr(state, "topic_history", []), default=str)
+                ),
+                "interaction_history": json.loads(
+                    json.dumps(getattr(state, "interaction_history", []), default=str)
+                ),
+            },
+        )
+
+    def prepare_gift(self, batch, allow_effect):
+        speech, audio = self._gift_runtime.prepare(batch, allow_effect)
+        return self._step(
+            {
+                "speech": speech,
+                "audio": audio,
+                "purpose": "gift_ack",
+                "batch_id": batch.batch_id,
+                "event_ids": [x.event_id for x in batch.items],
+            }
+        )
+
+    def finish_gift(self, batch_id, played):
+        self._gift_runtime.finish(batch_id, played)
 
     def submit(self, interaction: Interaction):
         from .live.state import Danmaku
@@ -238,6 +299,8 @@ class StorytellingDriver:
         ][-200:]
 
     def close(self):
+        if self._gift_runtime:
+            self._gift_runtime.close()
         if self._generator:
             self._generator.close()
         if self.engine:
@@ -245,7 +308,9 @@ class StorytellingDriver:
                 self.engine.background_interactions.close()
             if self._own_engine:
                 self.engine.tts.close_preparation()
-                close_client = getattr(getattr(self.engine.llm, "client", None), "close", None)
+                close_client = getattr(
+                    getattr(self.engine.llm, "client", None), "close", None
+                )
                 if callable(close_client):
                     close_client()
             self.engine.on_steering = self.engine.on_token_hunt = None

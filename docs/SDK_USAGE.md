@@ -176,3 +176,27 @@ N 是 `git rev-list --count <base>..HEAD`，不手动维护；相同源码和标
 
 携带 `+g...` 的开发包用于文件/GitHub Release/私有索引，不能上传公共 PyPI。
 正式发布使用维护者确认的版本标签。自动触发构建需要后续 CI 配置，本脚本不监听远端。
+
+
+## 可靠礼物与播放门禁
+
+`GiftBatchInput` 携带可信宿主提供的事件、用户、礼物价值/效果/句数快照及 `start_within` 剩余时限。
+`submit_gift_batch()` 返回本批感谢实际播完的 Future[bool]；只允许一个在途批次，同 ID 同内容复用结果，内容冲突拒绝。
+`start(autoplay=False)` 只消费礼物，正文不推进；宿主确认业务 LIVE 后 `set_autoplay(True)`。
+礼物步骤携带 purpose=gift_ack、batch_id、event_ids。宿主必须先向自己的交付系统确认 start，核对期限，再 COMMITTED/播放/PLAYED。
+感谢失败/过期回报 CANCELLED，效果不生效；只有感谢 PLAYED 后才提交仍匹配原稿和 revision 的候选效果。
+生成/改写预算 2 秒，异常保持原稿和固定感谢；候选音频准备失败同样保持原稿。效果最多一种且最多三行，不跨会话继承。
+已在运行的同步模型调用无法强杀，超时后的结果不得发布；新礼物不排队堆积同一模型工作线程。
+`finish()` 拒绝新输入并有界等待当前 COMMITTED 步骤；`stop()` 强制封闭并取消未完成步骤。
+宿主没有可靠回执时必须 estimated=True，不能将估算当作可靠礼物成功。
+
+## 公开归档
+
+`session.export_artifacts()` 返回缓存的 `SessionArtifacts`，包含原始剧本（含旧 metadata）、可空人物小传及终态记忆。
+宿主保存文件/S3；SDK 不隐式落盘。确认和估算历史分别输出，story_points 只来自确认播出，承诺只保留内容实际出现在确认文本中的未履行项。
+Web 补回 full_script.json/dossier.json，并写 artifacts.json 标明缺失资料。旧记忆缺少来源标志时不再自动作为确认经历注入。
+
+## 自动化
+
+`.github/workflows/sdk-build.yml` 在 dev/PR/tag 上构建和验证双 Python 安装；发布须手动 workflow_dispatch publish=true，并经过 sdk-release 环境。
+维护者应为该环境配置审核人。发布 GitHub Release 的版本及源码 manifest，拒绝覆盖已有 tag；本地验证不能证明远端工作流已经执行。

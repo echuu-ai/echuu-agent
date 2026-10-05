@@ -10,6 +10,12 @@ from pydantic import JsonValue
 from typing_extensions import Self
 
 from .config import EngineConfig
+from .session_extensions import (
+    ArtifactDriver,
+    GiftBatchInput,
+    GiftDriver,
+    SessionArtifacts,
+)
 from .session_types import (
     CapacityExceeded,
     Interaction,
@@ -80,6 +86,12 @@ class LiveSession:
         self._accepting = True
         self._started_at = monotonic()
         self.metrics: dict[str, float] = {}
+        self._artifacts = SessionArtifacts()
+        self._autoplay = True
+        self._draining = False
+        self._gifts: dict[str, tuple[GiftBatchInput, asyncio.Future[bool]]] = {}
+        self._gift_pending: tuple[GiftBatchInput, float] | None = None
+        self._gift_current: str | None = None
 
     @property
     def played_steps(self) -> tuple[PerformanceStep, ...]:
@@ -173,6 +185,7 @@ class LiveSession:
             if self.state != "PREPARING":
                 return
             self.metrics["preparation_seconds"] = monotonic() - start
+            await self._refresh_artifacts()
             self.state = "READY"
             await self._emit(
                 "ready",
@@ -186,9 +199,93 @@ class LiveSession:
             await self.stop("preparation_failed")
             raise
 
-    async def start(self) -> None:
+    def export_artifacts(self) -> SessionArtifacts:
+        """返回缓存的只读资料，不访问工作线程中的可变引擎状态。"""
+        memory = dict(self._artifacts.memory)
+        candidates = memory.pop("candidate_promises", [])
+        spoken = "\n".join(step.speech for step in self._played)
+        promises: list[JsonValue] = []
+        if isinstance(candidates, list):
+            promises = [
+                p
+                for p in candidates
+                if isinstance(p, dict)
+                and isinstance(p.get("content"), str)
+                and p["content"]
+                and str(p["content"]) in spoken
+                and not p.get("fulfilled")
+            ]
+        memory.update(
+            {
+                "name": self.inputs.name,
+                "initial_topic": self.inputs.topic,
+                "playback_source": "confirmed"
+                if self._played
+                else "estimated"
+                if self._estimated
+                else "unplayed",
+                "spoken_history": [
+                    step.model_dump(mode="json") for step in self._played
+                ],
+                "estimated_spoken_history": [
+                    step.model_dump(mode="json") for step in self._estimated
+                ],
+                "story_points": [step.speech for step in self._played[-3:]],
+                "promises": promises,
+            }
+        )
+        return self._artifacts.model_copy(update={"memory": memory}, deep=True)
+
+    async def _refresh_artifacts(self) -> None:
+        if isinstance(self._driver, ArtifactDriver):
+            self._artifacts = await self._call(self._driver.export_artifacts)
+
+    def set_autoplay(self, enabled: bool) -> None:
+        self._autoplay = enabled
+
+    def submit_gift_batch(self, batch: GiftBatchInput) -> asyncio.Future[bool]:
+        if self.state not in {"READY", "RUNNING"} or not self._accepting:
+            raise InvalidTransition("Session is not accepting gifts")
+        previous = self._gifts.get(batch.batch_id)
+        if previous:
+            if previous[0] != batch:
+                raise InvalidTransition("Gift batch contents changed")
+            return previous[1]
+        if not isinstance(self._driver, GiftDriver):
+            raise InvalidTransition("Driver does not support reliable gifts")
+        if (
+            self._gift_pending
+            or self._gift_current
+            or len(self._gifts) >= self.options.max_interactions
+        ):
+            raise CapacityExceeded("Gift capacity reached")
+        done: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+        self._gifts[batch.batch_id] = (batch, done)
+        self._gift_pending = (batch, monotonic() + batch.start_within)
+        return done
+
+    async def finish(self) -> None:
+        """封闭新输入，允许已提交的一段有界播完；未提交内容立即取消。"""
+        self._accepting = False
+        self._draining = True
+        if (
+            self.state != "RUNNING"
+            or not self._pending
+            or self._playback.get(self._pending.step_id) not in {"COMMITTED", "PLAYED"}
+        ):
+            await self.stop()
+            return
+        try:
+            await asyncio.wait_for(
+                self.wait_closed(), min(60, self.options.playback_timeout)
+            )
+        except asyncio.TimeoutError:
+            await self.stop("drain_timeout")
+
+    async def start(self, *, autoplay: bool = True) -> None:
         if self.state != "READY":
             raise InvalidTransition("start requires READY")
+        self._autoplay = autoplay
         self.state = "RUNNING"
         self._task = asyncio.create_task(
             self._run(), name=f"echuu:{self.inputs.session_id}"
@@ -224,8 +321,41 @@ class LiveSession:
     async def _run(self) -> None:
         try:
             while self.state == "RUNNING":
+                step: PerformanceStep | None
                 await self._tick()
-                step = await self._call(self._driver.next_step)
+                if self._draining:
+                    break
+                if self._gift_pending:
+                    batch, expires = self._gift_pending
+                    self._gift_pending = None
+                    if monotonic() >= expires:
+                        self._gifts[batch.batch_id][1].set_result(False)
+                        continue
+                    assert isinstance(self._driver, GiftDriver)
+                    self._gift_current = batch.batch_id
+                    try:
+                        step = await self._call(
+                            self._driver.prepare_gift,
+                            batch,
+                            self._autoplay,
+                            timeout=max(0.01, expires - monotonic()),
+                        )
+                    except SessionTimeout:
+                        # The worker may still be running; close rather than race its state.
+                        await self.stop("gift_preparation_timeout")
+                        return
+                    if monotonic() >= expires:
+                        await self._call(
+                            self._driver.finish_gift, batch.batch_id, False
+                        )
+                        self._gifts[batch.batch_id][1].set_result(False)
+                        self._gift_current = None
+                        continue
+                elif not self._autoplay:
+                    await asyncio.sleep(0.05)
+                    continue
+                else:
+                    step = await self._call(self._driver.next_step)
                 if self.state != "RUNNING" or step is None:
                     break
                 if step.step_id in self._playback:
@@ -241,7 +371,10 @@ class LiveSession:
                     "first_step_seconds", monotonic() - self._started_at
                 )
                 await self._emit("step", step=step)
-                deadline = monotonic() + self.options.playback_timeout
+                deadline = monotonic() + min(
+                    self.options.playback_timeout,
+                    60 if self._gift_current else self.options.playback_timeout,
+                )
                 while not self._ack.is_set() and self.state == "RUNNING":
                     if monotonic() >= deadline:
                         raise SessionTimeout("Host playback acknowledgement timed out")
@@ -252,8 +385,20 @@ class LiveSession:
                         pass
                 if self.state != "RUNNING":
                     break
-                if self._playback[step.step_id] == "PLAYED":
+                confirmed = (
+                    self._playback[step.step_id] == "PLAYED" and step in self._played
+                )
+                if confirmed:
                     await self._call(self._driver.played, step)
+                if self._gift_current:
+                    assert isinstance(self._driver, GiftDriver)
+                    key = self._gift_current
+                    await self._call(self._driver.finish_gift, key, confirmed)
+                    future = self._gifts[key][1]
+                    if not future.done():
+                        future.set_result(confirmed)
+                    self._gift_current = None
+                await self._refresh_artifacts()
                 self._pending = None
             await self.stop("completed")
         except asyncio.CancelledError:
@@ -331,6 +476,13 @@ class LiveSession:
         if self.state in {"STOPPING", "CLOSED"}:
             return
         self.state, self.reason = "STOPPING", reason
+        self._accepting = False
+        for key, (_, future) in self._gifts.items():
+            if not future.done():
+                confirmed = bool(
+                    key == self._gift_current and self._pending in self._played
+                )
+                future.set_result(confirmed)
         if self._pending and self._playback[self._pending.step_id] not in {
             "PLAYED",
             "CANCELLED",

@@ -24,6 +24,8 @@ TESTS = (
     "test_step_event_schema.py",
     "test_sdk_configuration.py",
     "test_live_session.py",
+    "test_session_extensions.py",
+    "test_gift_runtime.py",
 )
 
 PROBE = r"""

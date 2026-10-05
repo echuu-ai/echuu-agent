@@ -152,3 +152,7 @@ from .session_types import (
 )
 
 __all__ += ["AudioDescriptor", "Interaction", "LiveSession", "PerformanceStep", "SessionEvent", "SessionInput", "SessionOptions"]
+
+from .session_extensions import GiftBatchInput, GiftItem, SessionArtifacts
+
+__all__ += ["GiftBatchInput", "GiftItem", "SessionArtifacts"]

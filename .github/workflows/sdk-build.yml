@@ -1,0 +1,82 @@
+name: SDK build and release
+on:
+  push:
+    branches: [dev]
+    tags: ['v[0-9]*']
+  pull_request:
+    branches: [dev]
+  workflow_dispatch:
+    inputs:
+      publish:
+        type: boolean
+        default: false
+        description: Publish reviewed artifacts to a GitHub Release
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v6
+      - run: uv run --no-project scripts/build_sdk.py --out-dir /tmp/sdk-dist
+      - name: Export immutable source manifest
+        run: |
+          uv run --no-project python - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+          from zipfile import ZipFile
+          wheel = next(Path('/tmp/sdk-dist').glob('*.whl'))
+          with ZipFile(wheel) as z:
+              manifest = json.loads(z.read('echuu/_build.json'))
+          manifest.update(wheel=wheel.name, sha256=hashlib.sha256(wheel.read_bytes()).hexdigest())
+          Path('/tmp/sdk-dist/sdk-release.json').write_text(json.dumps(manifest, indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdk-dist
+          path: /tmp/sdk-dist/*
+  verify:
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ['3.10', '3.11']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdk-dist
+          path: /tmp/sdk-dist
+      - run: |
+          uv venv --python '${{ matrix.python }}' /tmp/sdk-verify
+          uv pip install --python /tmp/sdk-verify/bin/python /tmp/sdk-dist/*.whl pytest pytest-asyncio pydub
+          uv run --no-project --python /tmp/sdk-verify/bin/python scripts/verify_sdk_baseline.py --output /tmp/sdk-report
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sdk-report-${{ matrix.python }}
+          path: /tmp/sdk-report
+  publish:
+    needs: [build, verify]
+    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    environment: sdk-release
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdk-dist
+          path: dist
+      - name: Publish once, never overwrite
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          VERSION=$(python -c 'import json; print(json.load(open("dist/sdk-release.json"))["version"])')
+          gh release create "sdk-$VERSION" dist/* --target "$SOURCE_SHA" --prerelease --title "SDK $VERSION" --notes "Built from $SOURCE_SHA; installed regression passed."

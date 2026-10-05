@@ -36,6 +36,8 @@ def _load_prev_memory_summary(character_name: str, exclude_session: str = "") ->
         )
         for path in candidates:
             data = json.loads(path.read_text(encoding="utf-8"))
+            if data.get("playback_source") != "confirmed":
+                continue  # Legacy/estimated transcripts are not confirmed personal history.
             if data.get("name") != character_name:
                 continue
             parts = []

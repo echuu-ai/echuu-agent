@@ -42,6 +42,18 @@ async def run_storytelling(
         step_index = 0
         async for event in session.events():
             if event.type == "ready":
+                artifacts = session.export_artifacts()
+                for filename, value in (
+                    ("full_script.json", artifacts.script),
+                    ("dossier.json", artifacts.dossier),
+                ):
+                    if value is not None:
+                        (directory / filename).write_text(
+                            json.dumps(value, ensure_ascii=False), encoding="utf-8"
+                        )
+                (directory / "artifacts.json").write_text(
+                    artifacts.model_dump_json(), encoding="utf-8"
+                )
                 await broadcast(
                     {
                         "type": "ready",
@@ -90,23 +102,14 @@ async def run_storytelling(
                         )
                 step_index += 1
             elif event.type == "closed":
+                artifacts = session.export_artifacts()
+                memory = dict(artifacts.memory)
+                memory["playback_feedback"] = "estimated"
+                memory["schema_version"] = artifacts.schema_version
                 (directory / "memory.json").write_text(
-                    json.dumps(
-                        {
-                            "name": inputs.name,
-                            "initial_topic": inputs.topic,
-                            "playback_feedback": "estimated",
-                            "estimated_spoken_history": [
-                                s.model_dump(mode="json")
-                                for s in session.estimated_steps
-                            ],
-                            "story_points": [],
-                            "promises": [],
-                        },
-                        ensure_ascii=False,
-                    ),
-                    encoding="utf-8",
+                    json.dumps(memory, ensure_ascii=False), encoding="utf-8"
                 )
+                await broadcast({"type": "memory", "memory": memory})
                 if event.payload["reason"] not in {"completed", "stopped"}:
                     raise RuntimeError(str(event.payload["reason"]))
                 await broadcast(

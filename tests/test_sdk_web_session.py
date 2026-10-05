@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from echuu import EngineConfig, LiveSession, SessionInput
-from tests.test_live_session import Driver
+from tests.test_session_extensions import ExtendedDriver as Driver
 
 
 @pytest.mark.asyncio
@@ -46,11 +46,17 @@ async def test_web_host_gates_playback_and_labels_estimated_history(
     assert driver.generated == 0
     manager.request_play()
     await asyncio.wait_for(task, 3)
-    assert next(e for e in events if e["type"] == "step")[
-        "playback_feedback"
-    ] == "estimated"
+    assert (
+        next(e for e in events if e["type"] == "step")["playback_feedback"]
+        == "estimated"
+    )
     assert next(e for e in events if e["type"] == "step")["speech"] == "hello"
     history = json.loads((tmp_path / "memory.json").read_text())
     assert len(history["estimated_spoken_history"]) == 1
     assert history["story_points"] == []
     assert manager.current_session is None
+    assert json.loads((tmp_path / "full_script.json").read_text()) == {
+        "lines": ["hello"]
+    }
+    assert json.loads((tmp_path / "dossier.json").read_text()) == {"name": "host"}
+    assert history["spoken_history"] == []
