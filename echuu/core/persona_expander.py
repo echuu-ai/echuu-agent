@@ -12,9 +12,10 @@ import re
 from typing import Any, Optional, Protocol
 
 from echuu.core.persona_card import PersonaCard
-from echuu.core.persona_dossier import CharacterDossier, Conflict, BehaviorRules
+from echuu.core.persona_dossier import BehaviorRules, CharacterDossier, Conflict
 from echuu.core.prompt_leakage import find_prompt_leaks
 from echuu.core.tuning_guidance import render_generation_constraints
+from echuu.diagnostics import diagnostic
 
 
 class _LLM(Protocol):
@@ -118,7 +119,7 @@ class PersonaExpander:
             try:
                 raw = llm.generate(prompt)
             except Exception as exc:  # noqa: BLE001 — 扩充失败不阻塞开播
-                print(f"[PersonaExpander] LLM 调用失败: {exc}")
+                diagnostic(f"[PersonaExpander] LLM 调用失败: {exc}")
                 continue
             obj = _parse(raw)
             if not obj:

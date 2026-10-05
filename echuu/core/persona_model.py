@@ -10,6 +10,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from echuu.diagnostics import diagnostic
+
 
 class _LLM(Protocol):
     def generate(self, prompt: str) -> str: ...
@@ -92,7 +94,7 @@ class PersonaModel:
             try:
                 raw = llm.generate(prompt)
             except Exception as exc:  # LLM outage / API error → degrade, don't crash (spec §5)
-                print(f"[PersonaModel] LLM 调用失败 (attempt {attempt + 1}): {exc}")
+                diagnostic(f"[PersonaModel] LLM 调用失败 (attempt {attempt + 1}): {exc}")
                 continue
             obj = _parse_json(raw)
             if obj and all(k in obj and isinstance(obj[k], str) and obj[k].strip()

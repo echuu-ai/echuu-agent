@@ -5,9 +5,11 @@ No partial continuation may commit a topic change.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
 import re
+from dataclasses import dataclass
+
+from echuu.diagnostics import diagnostic
 
 from .untrusted import sanitize_untrusted
 
@@ -176,7 +178,7 @@ class TopicEvolution:
             return self._reject("continuity_rejected", (self.last_review or {}).get("reason", "连续性检查返回格式不合法"), retry=True)
         except Exception as exc:
             # Do not dump audience inputs, API credentials, or provider error bodies.
-            print(f"[TopicEvolution] 保留原稿: {type(exc).__name__}")
+            diagnostic(f"[TopicEvolution] 保留原稿: {type(exc).__name__}")
             return self._reject("model_error", f"模型调用或JSON解析失败：{type(exc).__name__}")
 
     def approve_reply(self, text: str, *, context: dict, interaction: dict) -> bool:

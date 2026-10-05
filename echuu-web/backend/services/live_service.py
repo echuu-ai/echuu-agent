@@ -360,6 +360,22 @@ class LiveService:
             return float(duration or 0.0)
 
         try:
+            if mode == "storytelling":
+                from echuu import EngineConfig, SessionInput
+                from .sdk_storytelling import run_storytelling
+                sdk_config = EngineConfig.from_env()
+                sdk_config = sdk_config.model_copy(update={"tts": sdk_config.tts.model_copy(update={"voice": voice or sdk_config.tts.voice})})
+                await run_storytelling(
+                    state=state, directory=session_dir, broadcast=bcast,
+                    inputs=SessionInput(session_id=session_id, name=character_name, persona=persona,
+                                        background=background, topic=topic, persona_card=persona_card,
+                                        max_steps=max_steps, memory=_load_prev_memory_summary(character_name, session_id)),
+                    config=sdk_config, initial_danmaku=initial_danmaku,
+                )
+                archive = await archive_session_to_s3(session_id, session_dir)
+                _finish_session_record(session_id, archive=archive)
+                await bcast({"type": "archived", "session_id": session_id, **archive})
+                return
             # 覆盖声音设置
             if voice:
                 os.environ["TTS_VOICE"] = voice
@@ -462,68 +478,11 @@ class LiveService:
                     )
                     generator = iter(events)
                 else:
-                    # storytelling（默认）：现有引擎路径，保留弹幕实时穿插
-                    # engine.state 要等 setup() 之后才存在，弹幕必须在 setup 完成后注入
-                    from echuu.modes.preparation import wait_for_script
-                    opening_future = loop.run_in_executor(None, produce_opening_safe)
-                    body_future = loop.run_in_executor(
-                        None,
-                        lambda: engine.setup(
-                            name=character_name,
-                            persona=persona,
-                            background=background,
-                            topic=topic,
-                            on_phase_callback=on_phase,
-                            persona_card=persona_card,
-                        ),
-                    )
-                    # Reserve time for ready: optional greeting audio must not
-                    # throw away a complete script when TTS is slow.
-                    opening_events = await wait_for_script(
-                        body_future, opening_future,
-                        deadline=preparation_deadline,
-                    )
-                    if not opening_events:
-                        on_phase("正文已就绪，直接进入主题")
-                    for dm_text in (initial_danmaku or []):
-                        dm = Danmaku.from_text(dm_text, user="观众")
-                        engine.state.danmaku_queue.append(dm)
-
-                    # 复制剧本到 session 目录
-                    script_sources = sorted(engine.scripts_dir.glob("*.json"), key=os.path.getmtime)
-                    if script_sources:
-                        shutil.copy(script_sources[-1], session_dir / "full_script.json")
-
-                    # 落盘人物小传（供回看/评测；失败不阻塞）
-                    try:
-                        if getattr(engine, "dossier", None):
-                            import json as _json
-                            from dataclasses import asdict as _asdict
-                            (session_dir / "dossier.json").write_text(
-                                _json.dumps(_asdict(engine.dossier), ensure_ascii=False, indent=2),
-                                encoding="utf-8",
-                            )
-                    except Exception as exc:  # noqa: BLE001
-                        print(f"[dossier] 落盘失败（跳过）: {exc}")
-
-                    from echuu.live.background_interactions import BackgroundInteractions
-                    engine.background_interactions = BackgroundInteractions(engine)
-                    generator = engine.run(max_steps=max_steps, play_audio=False, save_audio=True)
+                    raise ValueError(f"Unsupported mode: {mode}")
 
                 # 开场段先播（stage='opening'，前端按 stage 走 sequential 通道）
                 generator = chain(opening_events, generator)
 
-            if mode == "storytelling":
-                on_phase("剧本已就绪，正在预生成原稿语音…")
-                try:
-                    await asyncio.wait_for(
-                        asyncio.to_thread(engine.prepare_show_audio, on_phase), timeout=60,
-                    )
-                except TimeoutError as exc:
-                    # Provider connection timeouts and the preparation deadline
-                    # are speech failures, not script generation failures.
-                    raise RuntimeError("语音服务连接或预生成超时，请重试") from exc
-                on_phase("原稿语音已就绪，互动只重生成改写的句子")
             generation_active = False
             await bcast({
                 "type": "ready",
@@ -730,91 +689,27 @@ class LiveService:
             db.commit()
             db.refresh(live_session)
 
-            os.environ["TTS_MODEL"] = voice_config.tts_model
-            os.environ["TTS_VOICE"] = voice_config.voice_name
-
-            if llm_model.api_key_env:
-                api_key = os.getenv(llm_model.api_key_env)
-                if api_key:
-                    os.environ["DEFAULT_MODEL"] = llm_model.model_id
-
-            engine = EchuuLiveEngine()
-            state.set_engine(engine)
-
-            db_main_loop = asyncio.get_running_loop()
-            engine.on_steering = lambda payload: asyncio.run_coroutine_threadsafe(
-                bcast(payload), db_main_loop,
-            )
-            engine.on_token_hunt = lambda payload: asyncio.run_coroutine_threadsafe(
-                bcast(payload), db_main_loop,
-            )
-
-            def on_phase(msg: str):
-                asyncio.run_coroutine_threadsafe(
-                    bcast({"type": "reasoning", "content": msg}),
-                    db_main_loop,
-                )
-
-            engine.setup(
-                name=character.name,
-                persona=character.persona,
-                background=character.background or "",
-                topic=config.topic,
-                on_phase_callback=on_phase,
-            )
-
-            script_sources = sorted(engine.scripts_dir.glob("*.json"), key=os.path.getmtime)
-            if script_sources:
-                shutil.copy(script_sources[-1], session_dir / "full_script.json")
-
-            await bcast({
-                "type": "ready",
-                "content": f"剧本已生成并归档至 {session_id}",
-                "session_id": session_id,
-            })
-
+            from echuu import EngineConfig, SessionInput
+            from .sdk_storytelling import run_storytelling
+            provider = (llm_model.config or {}).get("provider")
+            if not provider and llm_model.provider.value != "custom":
+                provider = llm_model.provider.value
+            sdk_config = EngineConfig.from_env(provider=provider)
+            updates = {"model": llm_model.model_id, "api_key": None}
+            if llm_model.api_key_env and os.getenv(llm_model.api_key_env):
+                from pydantic import SecretStr
+                updates["api_key"] = SecretStr(os.environ[llm_model.api_key_env])
+            updates["tts"] = sdk_config.tts.model_copy(update={"voice": voice_config.voice_name, "model": voice_config.tts_model})
+            sdk_config = sdk_config.model_copy(update=updates)
             state.stop_requested = False
-            step_idx = 0
-            for result in engine.run(
-                max_steps=config.max_steps,
-                play_audio=False,
-                save_audio=True
-            ):
-                if state.stop_requested:
-                    break
-
-                audio_data = result.get("audio")
-                if audio_data:
-                    response_format = os.getenv("TTS_RESPONSE_FORMAT", "pcm").lower()
-                    ext = ".wav" if response_format == "pcm" else f".{response_format}"
-                    audio_filename = f"step_{step_idx}{ext}"
-                    with open(session_dir / audio_filename, "wb") as f:
-                        f.write(audio_data)
-                    result["audio_url"] = f"/audio/{session_id}/{audio_filename}"
-                    result.pop("audio", None)
-
-                # 广播 step 事件（扁平化）
-                await bcast({"type": "step", **result})
-
-                # 广播 memory 事件
-                memory = engine.state.memory
-                await bcast({
-                    "type": "memory",
-                    "memory": {
-                        "story_points": memory.story_points.get("mentioned", []),
-                        "promises": [p for p in memory.promises if not p.get("fulfilled")],
-                        "emotion_trend": [e["level"] for e in memory.emotion_track[-5:]],
-                    },
-                })
-
-                step_idx += 1
-                await asyncio.sleep(0.1)
-
-            await bcast({
-                "type": "success",
-                "session_id": session_id,
-                "content": "表演圆满结束",
-            })
+            state.reset_play_gate()
+            state.request_play()  # Historical database entry starts immediately.
+            await run_storytelling(
+                state=state, directory=session_dir, broadcast=bcast,
+                inputs=SessionInput(session_id=session_id, name=character.name, persona=character.persona,
+                                    background=character.background or "", topic=config.topic,
+                                    max_steps=config.max_steps), config=sdk_config,
+            )
 
             # 归档音频+脚本到 S3（失败只 log 不中断）
             archive = {
@@ -890,6 +785,15 @@ class LiveService:
         entities: list | None = None,
     ):
         """注入弹幕、投喂、线索收集或跑毛卡。"""
+        if state.is_running and getattr(state, "current_session", None) is not None:
+            from echuu import Interaction
+            dm = Danmaku.from_input(text, user=user, kind=kind, gift_id=gift_id,
+                                   client_id=client_id, amount=amount, entities=entities)
+            state.current_session.submit_interaction(Interaction(
+                event_id=client_id or dm.id, user_id=user, user_name=user, text=text,
+                kind=kind, gift_id=gift_id, amount=amount, entities=entities or [],
+            ))
+            return dm
         if not state.is_running or not state.current_engine:
             raise ValueError("直播未运行")
 

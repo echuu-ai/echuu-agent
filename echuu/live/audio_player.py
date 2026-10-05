@@ -9,6 +9,8 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from echuu.diagnostics import diagnostic
+
 
 class AudioPlayer:
     """
@@ -73,7 +75,7 @@ class AudioPlayer:
             return 0.0
 
         if not self.ffplay_available:
-            print("  ⚠️ ffplay 不可用，跳过音频播放")
+            diagnostic("  ⚠️ ffplay 不可用，跳过音频播放")
             return 0.0
 
         # 写入临时文件
@@ -100,7 +102,7 @@ class AudioPlayer:
             return duration
 
         except Exception as e:
-            print(f"  ⚠️ 音频播放失败: {e}")
+            diagnostic(f"  ⚠️ 音频播放失败: {e}")
             return 0.0
         finally:
             # 清理临时文件
@@ -122,7 +124,7 @@ class AudioPlayer:
 
         # 播放后添加自然停顿
         pause_duration = self.get_natural_pause(stage)
-        print(f"  ⏸️  自然停顿: {pause_duration:.1f}秒")
+        diagnostic(f"  ⏸️  自然停顿: {pause_duration:.1f}秒")
         time.sleep(pause_duration)
 
         return play_duration + pause_duration
@@ -150,9 +152,9 @@ class StreamSimulator:
             show_progress: 是否显示进度
             show_memory: 是否显示记忆状态
         """
-        print("\n" + "="*60)
-        print("🎙️  实时流式直播模拟")
-        print("="*60 + "\n")
+        diagnostic("\n" + "="*60)
+        diagnostic("🎙️  实时流式直播模拟")
+        diagnostic("="*60 + "\n")
 
         total_duration = 0.0
 
@@ -172,21 +174,21 @@ class StreamSimulator:
                 "end": "[END]",
             }.get(action, "[CONT]")
 
-            print(f"\n{'─'*40}")
-            print(f"[{step}] {stage} {action_icon}")
-            print(f"📢 {speech[:80]}{'...' if len(speech) > 80 else ''}")
-            print(f"{'─'*40}")
+            diagnostic(f"\n{'─'*40}")
+            diagnostic(f"[{step}] {stage} {action_icon}")
+            diagnostic(f"📢 {speech[:80]}{'...' if len(speech) > 80 else ''}")
+            diagnostic(f"{'─'*40}")
 
             # 播放音频（如果可用）
             if audio and self.player.ffplay_available:
                 duration = self.player.play_with_pause(audio, stage)
                 total_duration += duration
-                print(f"  ✅ 播放完成 (本次: {duration:.1f}s)")
+                diagnostic(f"  ✅ 播放完成 (本次: {duration:.1f}s)")
             elif audio:
-                print(f"  💾 音频已生成 ({len(audio)//1024}KB)")
+                diagnostic(f"  💾 音频已生成 ({len(audio)//1024}KB)")
                 # 即使不播放，也添加模拟停顿
                 pause = self.player.get_natural_pause(stage)
-                print(f"  ⏸️  模拟停顿: {pause:.1f}秒")
+                diagnostic(f"  ⏸️  模拟停顿: {pause:.1f}秒")
                 time.sleep(pause)
                 total_duration += pause
 
@@ -194,15 +196,15 @@ class StreamSimulator:
             if show_memory and step % 3 == 0:
                 memory = result.get("memory_display", "")
                 if memory:
-                    print(f"\n{memory}")
+                    diagnostic(f"\n{memory}")
 
             # 如果是结束动作，停止
             if action == "end":
                 break
 
-        print("\n" + "="*60)
-        print(f"🎬 直播模拟完成！")
-        print(f"   总时长: {total_duration:.1f}秒 ({total_duration/60:.1f}分钟)")
-        print("="*60 + "\n")
+        diagnostic("\n" + "="*60)
+        diagnostic(f"🎬 直播模拟完成！")
+        diagnostic(f"   总时长: {total_duration:.1f}秒 ({total_duration/60:.1f}分钟)")
+        diagnostic("="*60 + "\n")
 
         return total_duration

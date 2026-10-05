@@ -7,6 +7,8 @@ from __future__ import annotations
 import os
 from typing import Optional
 
+from echuu.diagnostics import diagnostic
+
 # 华北2（北京）地域；新加坡地域为 dashscope-intl.aliyuncs.com
 _CN_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 _INTL_BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
@@ -31,7 +33,7 @@ class QwenClient:
             from openai import OpenAI
 
             self.client = OpenAI(api_key=self.api_key, base_url=base_url, timeout=25, max_retries=0)
-            print(f"LLM 已初始化: {self.model} (DashScope)")
+            diagnostic(f"LLM 已初始化: {self.model} (DashScope)")
         except ImportError:
             raise ImportError("openai 未安装，请先安装 openai>=1.52.0")
 

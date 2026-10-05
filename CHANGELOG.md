@@ -1,0 +1,12 @@
+# Changelog
+
+## 0.2.0 开发版本（Git 派生，未发布）
+
+- 包内 TTS、显式 EngineConfig/TTSConfig，兼容原源码导入入口。
+- 异步 LiveSession：准备、启动、有界互动、版本化事件、播放反馈与幂等停止。
+- 已播事实以宿主回执为准，浏览器估算单独标注；保留旧引擎 API。
+- storytelling Web 编排共用包门面；库运行诊断默认静默。
+- 公开协议、类型检查和 wheel 安装回归；Python 包保留 3.10，研究 Web 入口要求 3.11。
+- 尚未进行真实 provider 听感验收；现有 dev 提示词例句测试与历史 lint 问题独立记录。
+
+- 从干净 Git 提交构建，自动生成版本及完整来源；替代手工 alpha 编号。

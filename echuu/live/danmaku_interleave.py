@@ -1,9 +1,10 @@
 """直播断句处的简短互动回应；后续剧情由 StorySteerer 单独连续改写。"""
 from __future__ import annotations
 
-from typing import Protocol
 import json
+from typing import Protocol
 
+from echuu.diagnostics import diagnostic
 from echuu.live.untrusted import render_untrusted, sanitize_untrusted
 
 
@@ -87,7 +88,7 @@ class DanmakuInterleaver:
         try:
             reply = self.llm.generate(prompt)
         except Exception as exc:
-            print(f"[DanmakuInterleaver] LLM 调用失败，跳过本次穿插: {exc}")
+            diagnostic(f"[DanmakuInterleaver] LLM 调用失败，跳过本次穿插: {exc}")
             return None
         reply = (reply or "").strip().strip('"“”')
         if len(reply) > 40:
@@ -107,7 +108,7 @@ class DanmakuInterleaver:
         try:
             reply = self.llm.generate(prompt)
         except Exception as exc:
-            print(f"[DanmakuInterleaver] 自嘲兜底生成失败，跳过: {exc}")
+            diagnostic(f"[DanmakuInterleaver] 自嘲兜底生成失败，跳过: {exc}")
             return None
         reply = (reply or "").strip().strip('"“”')
         return reply or None

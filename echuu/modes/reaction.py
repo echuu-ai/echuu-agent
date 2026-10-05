@@ -13,6 +13,8 @@ import os
 import re
 from typing import Callable, List, Optional
 
+from echuu.diagnostics import diagnostic
+
 from ..live.motion import pick_motion_for_reaction
 from ..live.timeline import estimate_wav_duration
 
@@ -128,7 +130,7 @@ def generate_reaction_script(engine, name: str, persona: str, background: str,
 
 # CLS → TTS 指令沿用 tts_instruction 的映射
 def _cls_instruction(cls: str, emotion: str) -> str:
-    from ..live.tts_instruction import CLS_INSTRUCTIONS, _EMOTION_HINTS
+    from ..live.tts_instruction import _EMOTION_HINTS, CLS_INSTRUCTIONS
     parts = [CLS_INSTRUCTIONS.get(cls, CLS_INSTRUCTIONS["NATURAL_CASUAL"])]
     if emotion in _EMOTION_HINTS:
         parts.append(_EMOTION_HINTS[emotion])
@@ -150,7 +152,7 @@ def produce_reaction_events(
         raise ValueError("reaction 模式需要 source.video_url（公网可访问的视频地址）")
 
     def phase(msg: str):
-        print(f"[reaction] {msg}")
+        diagnostic(f"[reaction] {msg}")
         if on_phase:
             on_phase(msg)
 
@@ -187,7 +189,7 @@ def produce_reaction_events(
                 if audio:
                     break
             except Exception as exc:
-                print(f"[reaction] TTS 失败（第{attempt + 1}次）: {exc}")
+                diagnostic(f"[reaction] TTS 失败（第{attempt + 1}次）: {exc}")
         duration = estimate_wav_duration(audio)
         cursor = effective_t + duration + REACTION_GAP
 

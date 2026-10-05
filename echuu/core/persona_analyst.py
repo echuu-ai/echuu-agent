@@ -13,9 +13,13 @@ import json
 import re
 from typing import Any, Protocol
 
+from echuu.core.discourse_mode import (
+    DISCOURSE_MODES,
+    MODE_GUIDES,
+    normalize_discourse_mode,
+)
 from echuu.core.persona_card import PersonaCard
 from echuu.core.persona_dossier import CharacterDossier
-from echuu.core.discourse_mode import DISCOURSE_MODES, MODE_GUIDES, normalize_discourse_mode
 from echuu.core.persona_model import RichPersona
 from echuu.core.prompt_leakage import find_prompt_leaks
 from echuu.core.story_core import StoryCore
@@ -23,6 +27,7 @@ from echuu.core.tuning_guidance import (
     normalize_tuning_guidance,
     render_generation_constraints,
 )
+from echuu.diagnostics import diagnostic
 
 
 class _LLM(Protocol):
@@ -390,7 +395,7 @@ class PersonaAnalyst:
             try:
                 raw = llm.generate(prompt)
             except Exception as exc:
-                print(f"[PersonaAnalyst] LLM 调用失败: {exc}")
+                diagnostic(f"[PersonaAnalyst] LLM 调用失败: {exc}")
                 continue
             obj = _parse(raw)
             if not obj:

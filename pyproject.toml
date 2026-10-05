@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "echuu"
-version = "0.1.0"
+dynamic = ["version"]
 description = "AI VTuber Auto-Live System - Learn from real streamers, generate natural content"
 readme = "README.md"
 license = {text = "MIT"}
@@ -34,6 +34,8 @@ classifiers = [
 ]
 
 dependencies = [
+    "pydantic>=2.0,<3",
+    "typing-extensions>=4.8",
     "python-dotenv>=1.0.0",
     "anthropic>=0.18.0",
     "openai>=1.12.0",
@@ -48,6 +50,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+audio = ["pydub>=0.25.1"]
 web = [
     "fastapi>=0.115.0",
     "uvicorn>=0.23.0",
@@ -66,14 +69,14 @@ dev = [
     "mypy>=1.0.0",
 ]
 all = [
-    "echuu[web,notebook,dev]",
+    "echuu[audio,web,notebook,dev]",
 ]
 
 [project.urls]
-Homepage = "https://github.com/CoryLee1/Echuu-AIVtuber-SDK"
-Documentation = "https://github.com/CoryLee1/Echuu-AIVtuber-SDK#readme"
-Repository = "https://github.com/CoryLee1/Echuu-AIVtuber-SDK"
-Issues = "https://github.com/CoryLee1/Echuu-AIVtuber-SDK/issues"
+Homepage = "https://github.com/echuu-ai/echuu-agent"
+Documentation = "https://github.com/echuu-ai/echuu-agent/blob/dev/docs/SDK_USAGE.md"
+Repository = "https://github.com/echuu-ai/echuu-agent"
+Issues = "https://github.com/echuu-ai/echuu-agent/issues"
 
 # [project.scripts]
 # echuu = "workflow.backend.echuu_interactive:main"  # 仅在完整项目中可用
@@ -84,7 +87,10 @@ include = ["echuu*"]
 exclude = ["echuu-web*", "workflow*", "data*", "output*", "docs*"]
 
 [tool.setuptools.package-data]
-echuu = ["py.typed"]
+echuu = ["py.typed", "_build.json"]
+
+[tool.setuptools.dynamic]
+version = {attr = "echuu._version.__version__"}
 
 [tool.black]
 line-length = 100

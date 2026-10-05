@@ -188,10 +188,13 @@ def test_rendering_uses_new_text_for_audio_and_records_actual_spoken_context():
 
 
 def test_project_root_is_independent_of_checkout_name_and_working_directory(tmp_path, monkeypatch):
-    from echuu.live.engine import _find_project_root
-    from pathlib import Path
+    from echuu.live import engine
+    checkout = tmp_path / "renamed-checkout"
+    (checkout / "workflow" / "backend").mkdir(parents=True)
+    (checkout / "pyproject.toml").touch()
+    monkeypatch.setattr(engine, "__file__", str(checkout / "echuu" / "live" / "engine.py"))
     monkeypatch.chdir(tmp_path)
-    assert _find_project_root() == Path(__file__).resolve().parents[1]
+    assert engine._find_project_root() == checkout
 
 
 def test_continuity_rejection_rolls_back_without_partial_topic_change():

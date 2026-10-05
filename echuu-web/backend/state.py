@@ -12,6 +12,7 @@ class GlobalStateManager:
     """全局状态管理器"""
 
     def __init__(self):
+        self.current_session = None
         self.is_running = False
         self.active_session_id: Optional[str] = None
         self.active_connections: Dict[str, WebSocket] = {}
