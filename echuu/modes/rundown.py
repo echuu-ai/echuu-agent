@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from typing import Callable, List, Optional
 
+from echuu.diagnostics import diagnostic
+
 from .reaction import _cls_instruction, _parse_json_array
 
 _MODE_INTENT = {
@@ -71,7 +73,7 @@ def _to_events(lines: List[dict], mode: str, stage: str, tts_client,
                 if audio:
                     break
             except Exception as exc:  # noqa: BLE001 — TTS 失败降级为纯字幕
-                print(f"[rundown] TTS 失败（第{attempt + 1}次）: {exc}")
+                diagnostic(f"[rundown] TTS 失败（第{attempt + 1}次）: {exc}")
         events.append({
             "type": "step",
             "mode": mode,

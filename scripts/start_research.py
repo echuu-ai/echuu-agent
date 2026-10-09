@@ -13,6 +13,8 @@ def main():
     parser.add_argument('--host', default='127.0.0.1')
     parser.add_argument('--port', type=int, default=8000)
     args = parser.parse_args()
+    if sys.version_info < (3, 11):
+        parser.error("Research backend requires Python >=3.11 (asyncio.timeout_at); the SDK supports >=3.10")
     from dotenv import load_dotenv
     load_dotenv(args.env_file)
     os.environ['SERVER_HOST'] = args.host

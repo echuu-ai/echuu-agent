@@ -10,6 +10,7 @@ import json
 from dataclasses import replace
 from typing import Protocol
 
+from echuu.diagnostics import diagnostic
 from echuu.live.untrusted import sanitize_untrusted
 
 
@@ -103,15 +104,15 @@ class StorySteerer:
                 raw = raw.split("\n", 1)[1].rsplit("```", 1)[0]
             result = json.loads(raw)["lines"]
             if not isinstance(result, list) or len(result) < min(2, len(lines)):
-                print("[StorySteerer] 连续改写不足两句")
+                diagnostic("[StorySteerer] 连续改写不足两句")
                 return None
             result = result[:len(lines)]  # 多出的内容不追加，允许两句有效续写
             if any(not isinstance(line, str) or not line.strip() or len(line) > 120 for line in result):
-                print("[StorySteerer] 连续改写台词为空或过长")
+                diagnostic("[StorySteerer] 连续改写台词为空或过长")
                 return None
             return [line.strip() for line in result]
         except Exception as exc:
-            print(f"[StorySteerer] 连续改写失败，保留原稿: {type(exc).__name__}")
+            diagnostic(f"[StorySteerer] 连续改写失败，保留原稿: {type(exc).__name__}")
             return None
 
     def rewrite_line(self, *, spine: str, topic: str, user: str, trigger: str,
@@ -153,7 +154,7 @@ class StorySteerer:
         try:
             text = self.llm.generate(prompt)
         except Exception as exc:  # noqa: BLE001 — 转向失败不挡当场回应
-            print(f"[StorySteerer] 改写下一句失败（跳过）: {exc}")
+            diagnostic(f"[StorySteerer] 改写下一句失败（跳过）: {exc}")
             return None
         text = (text or "").strip().strip('"“”')
         return text or None

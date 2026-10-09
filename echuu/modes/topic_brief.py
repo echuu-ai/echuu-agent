@@ -3,9 +3,12 @@
 不支持联网或请求失败时返回空串；有检索但无来源时明确标记未核实。
 """
 from __future__ import annotations
+
 import os
 from datetime import datetime
 from zoneinfo import ZoneInfo
+
+from echuu.diagnostics import diagnostic
 
 _BRIEF_PROMPT = """今天是{today}（Asia/Shanghai）。为直播主题「{topic}」检索截至今天的最新事实，而不是凭训练记忆回答。
 先识别产品/事件的正式名称及别名，再搜索官方网站、官方新闻稿，优先最新公告。比较事件发生日与文章发布日期。
@@ -28,7 +31,7 @@ def produce_topic_brief(llm, topic: str) -> str:
             return ""
         text = search(_BRIEF_PROMPT.format(topic=topic, today=datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()), max_tokens=850)
     except Exception as exc:  # noqa: BLE001 — grounding 失败不阻塞开播
-        print(f"[topic-brief] 联网检索失败（跳过）: {exc}")
+        diagnostic(f"[topic-brief] 联网检索失败（跳过）: {exc}")
         return ""
     return (text or "").strip()
 

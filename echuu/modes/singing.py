@@ -20,6 +20,8 @@ import re
 from pathlib import Path
 from typing import Callable, List, Optional
 
+from echuu.diagnostics import diagnostic
+
 from .degrade import degrade_vocal
 
 TALK_GAP_INSTRUCTION = {
@@ -207,7 +209,7 @@ def produce_singing_events(
     song_title = (source or {}).get("song_title", "")
 
     def phase(msg: str):
-        print(f"[singing] {msg}")
+        diagnostic(f"[singing] {msg}")
         if on_phase:
             on_phase(msg)
 
@@ -285,7 +287,7 @@ def produce_singing_events(
                 if audio:
                     break
             except Exception as exc:
-                print(f"[singing] TTS 失败: {exc}")
+                diagnostic(f"[singing] TTS 失败: {exc}")
         events.append({
             "type": "step", "mode": "singing_learn", "event": "talk",
             "speech": text, "stage": kind, "audio": audio,

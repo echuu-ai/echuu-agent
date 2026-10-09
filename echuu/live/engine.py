@@ -5,10 +5,10 @@ echuu 实时引擎（解耦版，支持多语言）。
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import random
-import hashlib
 from collections import OrderedDict, defaultdict
 from dataclasses import asdict
 from datetime import datetime
@@ -17,18 +17,19 @@ from threading import Lock
 from time import perf_counter
 from typing import Dict, List, Optional
 
-from dotenv import load_dotenv
+from echuu.diagnostics import diagnostic
 
-from ..core.pattern_analyzer import PatternAnalyzer
-from ..core.persona_model import PersonaModel, RichPersona
-from ..core.persona_analyst import PersonaAnalyst, PROMPT_VERSION as ANALYST_PROMPT_VERSION
-from ..core.persona_expander import PersonaExpander, PROMPT_VERSION as DOSSIER_PROMPT_VERSION
-from ..core.persona_dossier import CharacterDossier
-from ..core.prompt_leakage import find_prompt_leaks
+from ..config import EngineConfig
 from ..core.output_safety import sanitize_audience_text
+from ..core.pattern_analyzer import PatternAnalyzer
+from ..core.persona_analyst import PROMPT_VERSION as ANALYST_PROMPT_VERSION
+from ..core.persona_analyst import PersonaAnalyst
+from ..core.persona_dossier import CharacterDossier
+from ..core.persona_expander import PROMPT_VERSION as DOSSIER_PROMPT_VERSION
+from ..core.persona_expander import PersonaExpander
+from ..core.persona_model import PersonaModel, RichPersona
+from ..core.prompt_leakage import find_prompt_leaks
 from ..core.story_core import StoryCore
-from ..core.unit import ScriptLine, Show
-from ..core.unit_planner import UnitPlanner
 from ..core.structure_breaker import StructureBreaker
 from ..core.tuning_guidance import (
     normalize_tuning_guidance,
@@ -37,23 +38,25 @@ from ..core.tuning_guidance import (
     tuning_guidance_fingerprint,
     tuning_guidance_ids,
 )
+from ..core.unit import ScriptLine, Show
+from ..core.unit_planner import UnitPlanner
 from ..generators.example_sampler import ExampleSampler
-from ..generators.script_writer import ScriptWriter, PROMPT_VERSION as WRITER_PROMPT_VERSION
 from ..generators.legacy_v4 import ScriptGeneratorV4, adapt_duration_config
+from ..generators.script_writer import PROMPT_VERSION as WRITER_PROMPT_VERSION
+from ..generators.script_writer import ScriptWriter
+from ..harness.runtime import approve_reply, guard_steering, trace_runtime
+from .audio_player import StreamSimulator
 from .danmaku import DanmakuEvaluator, DanmakuHandler
 from .danmaku_interleave import DanmakuInterleaver
-from .story_steerer import StorySteerer, annotate_remaining_beats
-from .topic_evolution import TopicEvolution
 from .gifts import normalize_gift
+from .language import StreamLanguageContext, setup_stream_language_from_topic
 from .llm_factory import create_llm_client
+from .motion import pick_motion_for_danmaku, pick_motion_for_step
 from .performer import PerformerV3
 from .state import Danmaku, PerformanceState, PerformerMemory
+from .story_steerer import StorySteerer, annotate_remaining_beats
+from .topic_evolution import TopicEvolution
 from .tts_client import TTSClient
-from .language import setup_stream_language_from_topic, StreamLanguageContext
-from .motion import pick_motion_for_danmaku, pick_motion_for_step
-from ..harness.runtime import trace_runtime, guard_steering, approve_reply
-from .audio_player import StreamSimulator
-
 
 _DOSSIER_CACHE_VERSION = "v2-soft-conflict"
 _DOSSIER_CACHE_MAX_SIZE = 128
@@ -102,7 +105,8 @@ def _find_project_root() -> Path:
     for root in Path(__file__).resolve().parents:
         if (root / "pyproject.toml").is_file() and (root / "workflow" / "backend").is_dir():
             return root
-    raise RuntimeError("Cannot locate echuu project root (pyproject.toml + workflow/backend)")
+    # Installed wheels have no checkout. Explicit config does not rely on this fallback.
+    return Path.cwd()
 
 
 class _LLMGenerateAdapter:
@@ -224,30 +228,43 @@ class EchuuLiveEngine:
     - Phase 2: 实时表演 + 记忆系统 + 弹幕互动
     """
 
-    def __init__(self, data_path: Optional[str] = None, llm_provider: Optional[str] = None):
-        """
-        初始化 echuu 实时引擎。
+    def __init__(
+        self, data_path: Optional[str] = None, llm_provider: Optional[str] = None,
+        *, config: EngineConfig | None = None, llm=None, tts=None,
+    ):
+        """构建引擎，不加载环境文件、不调用模型、不创建输出目录。
 
         Args:
-            data_path: 数据文件路径（可选）。
-            llm_provider: LLM 提供商 ("gemini", "claude", "openai")。
-                          如果未指定，根据可用的 API Key 自动选择。
+            data_path: 兼容旧接口的标注数据路径，优先于配置。
+            llm_provider: 兼容旧接口的提供商覆盖。
+            config: 显式配置；省略时读取现有环境，源码运行复用仓库数据。
+            llm: 调用者提供的模型客户端；提供时不创建默认客户端。
+            tts: 调用者提供的语音客户端；资源所有权保留给调用者。
         """
         self.project_root = _find_project_root()
-        load_dotenv(self.project_root / ".env")
-
-        self.llm = create_llm_client(provider=llm_provider)
-        self.tts = TTSClient()
-
+        checkout = self.project_root if (self.project_root / "pyproject.toml").is_file() and (self.project_root / "workflow" / "backend").is_dir() else None
+        self.config = config if config is not None else EngineConfig.from_env(project_root=checkout, provider=llm_provider)
+        data_file = Path(data_path) if data_path else self.config.annotated_data_path
+        clips_file = self.config.examples_path
+        for supplied in (data_file, clips_file):
+            if supplied is not None and not supplied.is_file():
+                raise FileNotFoundError(supplied)
+        if llm is None:
+            if config is not None and (not config.api_key or not (llm_provider or config.provider)):
+                raise ValueError("Explicit config requires provider and api_key, or an injected llm")
+            self.llm = create_llm_client(
+                provider=llm_provider or self.config.provider,
+                api_key=self.config.api_key.get_secret_value() if self.config.api_key else None,
+                model=self.config.model,
+            )
+        else:
+            self.llm = llm
         self.analyzer = None
-        data_file = Path(data_path) if data_path else self.project_root / "data" / "annotated_clips.json"
-        if data_file.exists():
+        if data_file is not None:
             with data_file.open("r", encoding="utf-8") as f:
-                clips = json.load(f)
-            self.analyzer = PatternAnalyzer(clips)
-
-        clips_file = self.project_root / "data" / "vtuber_raw_clips_for_notebook_full_30_cleaned.jsonl"
-        self.example_sampler = ExampleSampler(str(clips_file)) if clips_file.exists() else None
+                self.analyzer = PatternAnalyzer(json.load(f))
+        self.example_sampler = ExampleSampler(str(clips_file)) if clips_file is not None else None
+        self.tts = tts if tts is not None else TTSClient(config=self.config.tts)
 
         # V5 modules expect a `.generate(prompt)` LLM contract; real clients
         # expose `.call(...)`. Adapt once, here, at the engine boundary.
@@ -274,8 +291,8 @@ class EchuuLiveEngine:
         self.on_token_hunt = None
         self.performer = PerformerV3(self.llm, self.tts, self.danmaku_handler)
 
-        self.scripts_dir = self.project_root / "output" / "scripts"
-        self.scripts_dir.mkdir(parents=True, exist_ok=True)
+        self.scripts_dir = (self.config.output_dir or Path.cwd() / "output" / "scripts").resolve()
+        self._auto_save_scripts = self.config.output_dir is not None
 
         self.state: Optional[PerformanceState] = None
         self.stream_lang_context: Optional[StreamLanguageContext] = None
@@ -323,8 +340,8 @@ class EchuuLiveEngine:
             depth_budget=depth_budget,
             entertainment_mechanism=entertainment_mechanism,
         )
-        print(f"\n表演设置完成: {name} - {topic}")
-        print(f"剧本行数: {len(self.state.script_lines)}")
+        diagnostic(f"\n表演设置完成: {name} - {topic}")
+        diagnostic(f"剧本行数: {len(self.state.script_lines)}")
         return self.state
 
     def _maybe_expand(
@@ -356,7 +373,7 @@ class EchuuLiveEngine:
                 _cache_dossier(cache_key, dossier)
             return dossier
         except Exception as exc:  # noqa: BLE001 — 扩充失败不阻塞开播
-            print(f"[engine] 人物小传扩充失败（跳过）: {exc}")
+            diagnostic(f"[engine] 人物小传扩充失败（跳过）: {exc}")
             return None
 
     def _create_legacy_v4_performance(
@@ -403,7 +420,7 @@ class EchuuLiveEngine:
         if writer_config["output_format"] == "shareable_clip":
             from .qwen_client import QwenClient
             if isinstance(self.llm, QwenClient):
-                clip_model = writer_config.get("clip_model") or os.getenv("ECHUU_CLIP_MODEL", "qwen3-max")
+                clip_model = writer_config.get("clip_model") or (self.config.clip_model if hasattr(self, "config") else os.getenv("ECHUU_CLIP_MODEL", "qwen3-max"))
                 if clip_model != self.llm.model:
                     clip_client = QwenClient(api_key=self.llm.api_key, model=clip_model)
                     clip_client.seed = seed
@@ -544,7 +561,7 @@ class EchuuLiveEngine:
         from echuu.core.persona_card import PersonaCard
 
         pipeline = str(
-            story_pipeline or os.getenv("ECHUU_STORY_PIPELINE", "legacy_v4")
+            story_pipeline or (self.config.story_pipeline if hasattr(self, "config") else os.getenv("ECHUU_STORY_PIPELINE", "legacy_v4"))
         ).strip().lower()
         self._harness_directory = None
         self._harness_content = None
@@ -611,12 +628,12 @@ class EchuuLiveEngine:
             },
         })
         self.stream_lang_context = setup_stream_language_from_topic(topic, persona)
-        print(f"🌐 语言设置: {self.stream_lang_context.greeting_style}")
+        diagnostic(f"🌐 语言设置: {self.stream_lang_context.greeting_style}")
 
         # 用户人设卡（可选）：口癖/称呼/雷点等硬约束，贯穿 analyst/writer/弹幕回应
         self.persona_card = PersonaCard.from_dict(persona_card)
         if self.persona_card:
-            print(f"🎴 人设卡已加载: 口癖={list(self.persona_card.speech_tics)}, "
+            diagnostic(f"🎴 人设卡已加载: 口癖={list(self.persona_card.speech_tics)}, "
                   f"观众称呼={self.persona_card.audience_nickname or '（无）'}")
 
         if pipeline == "harness_story_v1":
@@ -675,7 +692,7 @@ class EchuuLiveEngine:
             "output": dossier_output,
         })
         if self.dossier and not self.dossier.is_empty():
-            print(f"🎭 人物小传冲突: {self.dossier.conflict.statement}")
+            diagnostic(f"🎭 人物小传冲突: {self.dossier.conflict.statement}")
 
         if on_phase_callback:
             on_phase_callback("Phase A: 分析人设三轴 + 故事内核...")
@@ -744,7 +761,7 @@ class EchuuLiveEngine:
             "metrics": {"unit_count": len(units)},
             "output": [asdict(unit) for unit in units],
         })
-        print(f"🎚️ 节目长度: {len(units)} 段 (~{int(len(units) * 75 / 60)}min，按故事自适应)")
+        diagnostic(f"🎚️ 节目长度: {len(units)} 段 (~{int(len(units) * 75 / 60)}min，按故事自适应)")
 
         if on_phase_callback:
             on_phase_callback("Phase C: 抽相关 few-shot + 编剧创作...")
@@ -759,7 +776,7 @@ class EchuuLiveEngine:
                 exclude_ids=retrieval_exclude_ids or (),
             )
         n_ex = len(few_shot_ids)
-        print(f"📚 few-shot 示例注入: {n_ex} 条 (sampler={'on' if self.example_sampler else 'off'})")
+        diagnostic(f"📚 few-shot 示例注入: {n_ex} 条 (sampler={'on' if self.example_sampler else 'off'})")
         writer_input = {
             "rich_persona": asdict(rich_persona),
             "story_core": asdict(story_core),
@@ -840,7 +857,7 @@ class EchuuLiveEngine:
             self.script_writer.last_planted_gags or list(rich_persona.life_anchors[:1]),
         )
         if len(self.gag_ledger):
-            print(f"🪃 已埋梗: {self.gag_ledger.unrecalled()}")
+            diagnostic(f"🪃 已埋梗: {self.gag_ledger.unrecalled()}")
 
         if on_phase_callback:
             on_phase_callback("Phase D: 清洗升华...")
@@ -926,11 +943,11 @@ class EchuuLiveEngine:
         if save_audio and self.tts.enabled:
             self.tts.start_recording()
 
-        print(f"\n{'='*60}")
-        print("开始实时表演 (V5)")
+        diagnostic(f"\n{'='*60}")
+        diagnostic("开始实时表演 (V5)")
         if save_audio and self.tts.enabled:
-            print(f"正在录制... (输出格式: {'MP3' if convert_to_mp3 else 'WAV'})")
-        print(f"{'='*60}\n")
+            diagnostic(f"正在录制... (输出格式: {'MP3' if convert_to_mp3 else 'WAV'})")
+        diagnostic(f"{'='*60}\n")
 
         # 每讲完一行处理一条互动，已播文本与尚未播出的续写分开维护。
         lines_since_resp = 0
@@ -959,9 +976,9 @@ class EchuuLiveEngine:
             self.state.memory.script_progress["current_stage"] = ev["line"]["stage"]
             last_line_text = ev["line"]["text"]
 
-            print(f"[Unit {unit_idx+1}/{len(self.state.show.units)} · {ev['line']['stage']}] {last_line_text[:80]}{'...' if len(last_line_text) > 80 else ''}")
+            diagnostic(f"[Unit {unit_idx+1}/{len(self.state.show.units)} · {ev['line']['stage']}] {last_line_text[:80]}{'...' if len(last_line_text) > 80 else ''}")
             if ev["line"]["is_rupture"] and is_first_chunk:
-                print(f"  💥 rupture_kind={ev['unit']['rupture_kind']}")
+                diagnostic(f"  💥 rupture_kind={ev['unit']['rupture_kind']}")
 
             self._remember_spoken(ev.get("speech", ""), ev["line"]["id"], "story")
             yield ev
@@ -984,7 +1001,7 @@ class EchuuLiveEngine:
                 interact_window = 4
                 interact_question = last_line_text
                 quip_armed = True
-                print(f"  🙋 互动点已抛出，窗口开启: {interact_question[:40]}")
+                diagnostic(f"  🙋 互动点已抛出，窗口开启: {interact_question[:40]}")
             elif interact_window > 0:
                 interact_window -= 1
 
@@ -1013,7 +1030,7 @@ class EchuuLiveEngine:
                     lines_since_resp = 0
                     quip_armed = False  # 有人理了，不用自嘲
                     self.state.current_step += 1
-                    print(f"  💬 回应弹幕[{resp_ev['danmaku']['user']}]: {resp_ev['speech'][:60]}")
+                    diagnostic(f"  💬 回应弹幕[{resp_ev['danmaku']['user']}]: {resp_ev['speech'][:60]}")
                     yield resp_ev
                     if self.state.current_step >= max_steps:
                         break
@@ -1023,7 +1040,7 @@ class EchuuLiveEngine:
                 quip_ev = self._maybe_no_reaction_quip(unit_idx, interact_question)
                 if quip_ev is not None:
                     self.state.current_step += 1
-                    print(f"  🫥 没人理，自嘲兜底: {quip_ev['speech'][:50]}")
+                    diagnostic(f"  🫥 没人理，自嘲兜底: {quip_ev['speech'][:50]}")
                     yield quip_ev
                     if self.state.current_step >= max_steps:
                         break
@@ -1035,13 +1052,14 @@ class EchuuLiveEngine:
             self.tts.save_recording(str(audio_path), convert_to_mp3=convert_to_mp3,
                                     keep_wav=False, gap_ms=segment_gap_ms)
 
-        print(f"\n{'='*60}\n表演结束！\n{'='*60}\n")
+        diagnostic(f"\n{'='*60}\n表演结束！\n{'='*60}\n")
 
     def prepare_show_audio(self, on_progress=None):
         """Prepare speech without consuming lines, memory, or interaction queues."""
         from dataclasses import asdict
-        from .tts_instruction import build_instruction
+
         from .breath import chunk_text
+        from .tts_instruction import build_instruction
         futures = []
         for unit in self.state.show.units:
             self.tts.update_session(**asdict(unit.acoustic))
@@ -1070,8 +1088,9 @@ class EchuuLiveEngine:
         Yields one step-event dict per line. TTS failures yield audio=None
         but do NOT abort the loop (spec §5)."""
         from dataclasses import asdict as _asdict
-        from .tts_instruction import build_instruction, infer_cls
+
         from .breath import chunk_text
+        from .tts_instruction import build_instruction, infer_cls
         show = self.state.show
         for unit in show.units:
             self.tts.update_session(**_asdict(unit.acoustic))
@@ -1321,6 +1340,8 @@ class EchuuLiveEngine:
         return self._evolve_topic(dm, upcoming)
 
     def _remember_spoken(self, text, line_id, kind):
+        if getattr(self, "defer_playback_history", False):
+            return
         history = list(getattr(self.state, "spoken_history", []) or [])
         history.append({"id": line_id, "text": text, "kind": kind})
         self.state.spoken_history = history[-200:]
@@ -1588,7 +1609,10 @@ class EchuuLiveEngine:
             self.tts.save_recording(str(audio_path), convert_to_mp3=convert_to_mp3, keep_wav=False)
 
     def _save_script_v5(self, show, name: str, topic: str):
-        """V5 Show → JSON dump."""
+        """显式启用导出时保存 Show；嵌入模式默认不落盘。"""
+        if not getattr(self, "_auto_save_scripts", True):
+            return
+        self.scripts_dir.mkdir(parents=True, exist_ok=True)
         from dataclasses import asdict
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         safe_topic = topic[:30].replace(" ", "_").replace("/", "_")
@@ -1629,17 +1653,17 @@ class EchuuLiveEngine:
 
         with filepath.open("w", encoding="utf-8") as f:
             json.dump(script_data, f, ensure_ascii=False, indent=2)
-        print(f"V5 剧本已保存: {filepath}")
+        diagnostic(f"V5 剧本已保存: {filepath}")
 
     def _print_script_preview_v5(self, show):
         """V5 Show → console preview."""
-        print("\n生成的剧本（V5）：")
-        print("=" * 60)
+        diagnostic("\n生成的剧本（V5）：")
+        diagnostic("=" * 60)
         for u in show.units:
-            print(f"\n--- Unit {u.index + 1} / 4 · axis={u.axis} · density={u.density} ---")
-            print(f"  acoustic: pitch={u.acoustic.pitch_rate}, rate={u.acoustic.speech_rate}, vol={u.acoustic.volume}")
+            diagnostic(f"\n--- Unit {u.index + 1} / 4 · axis={u.axis} · density={u.density} ---")
+            diagnostic(f"  acoustic: pitch={u.acoustic.pitch_rate}, rate={u.acoustic.speech_rate}, vol={u.acoustic.volume}")
             for i, line in enumerate(u.lines):
                 rupture_marker = " 💥" if line.is_rupture else ""
                 preview = line.text[:80] + ("..." if len(line.text) > 80 else "")
-                print(f"  [{i}] {line.stage}{rupture_marker}  {preview}")
-        print("\n" + "=" * 60 + "\n")
+                diagnostic(f"  [{i}] {line.stage}{rupture_marker}  {preview}")
+        diagnostic("\n" + "=" * 60 + "\n")

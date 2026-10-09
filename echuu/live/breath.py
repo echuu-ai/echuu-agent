@@ -11,6 +11,8 @@ import re
 import struct
 from typing import Callable, List, Optional
 
+from echuu.diagnostics import diagnostic
+
 SAMPLE_RATE = 24000
 _WAV_HEADER_LEN = 44
 
@@ -148,7 +150,7 @@ def synthesize_with_breath(
         try:
             wav = synth(group)
         except Exception as exc:  # noqa: BLE001 — 单组失败不拖垮整句
-            print(f"[breath] 分段合成失败（跳过）: {exc}")
+            diagnostic(f"[breath] 分段合成失败（跳过）: {exc}")
             wav = None
         if wav:
             synthesized.append((group, wav))

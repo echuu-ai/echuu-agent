@@ -1,9 +1,10 @@
 """直播断句处的简短互动回应；后续剧情由 StorySteerer 单独连续改写。"""
 from __future__ import annotations
 
-from typing import Protocol
 import json
+from typing import Protocol
 
+from echuu.diagnostics import diagnostic
 from echuu.live.untrusted import render_untrusted, sanitize_untrusted
 
 
@@ -26,7 +27,7 @@ _PROMPT = """\
 要求：
 - 只回一句，15到30字，最多40字。自然口语，不强塞口癖。
 - 根据处理决定，简单回应、补充当前话题或接向相关新话题；如果仅回应，不要承诺后面展开。
-- 已进入新话题时不要说“先回原来的故事”，不要否认前面已经说过的事情。
+- 已进入新话题时不要要求返回原话题，不要否认前面已经说过的事情。
 - 礼物按真实名称和类别理解，饭团是食物，不是石头；不要念旧资源ID。
 - 不要强行说回原稿，不复述之前的台词，不添加产品事实。
 - 只输出你要说的话，不要任何解释、不要引号、不要括号说明。
@@ -87,7 +88,7 @@ class DanmakuInterleaver:
         try:
             reply = self.llm.generate(prompt)
         except Exception as exc:
-            print(f"[DanmakuInterleaver] LLM 调用失败，跳过本次穿插: {exc}")
+            diagnostic(f"[DanmakuInterleaver] LLM 调用失败，跳过本次穿插: {exc}")
             return None
         reply = (reply or "").strip().strip('"“”')
         if len(reply) > 40:
@@ -107,7 +108,7 @@ class DanmakuInterleaver:
         try:
             reply = self.llm.generate(prompt)
         except Exception as exc:
-            print(f"[DanmakuInterleaver] 自嘲兜底生成失败，跳过: {exc}")
+            diagnostic(f"[DanmakuInterleaver] 自嘲兜底生成失败，跳过: {exc}")
             return None
         reply = (reply or "").strip().strip('"“”')
         return reply or None
