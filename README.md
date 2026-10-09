@@ -1,5 +1,7 @@
 [启动、输入输出与给扣扣的互动说明](docs/KOKO_HANDOFF.md) · [服务端提示词原文](docs/INTERACTION_PROMPTS.md)
 
+Python SDK 的版本、安装验证和下游整合入口：[SDK 交付说明](docs/SDK_HANDOFF.md)。
+
 [作为 Python 包使用：显式配置、安装与兼容说明](docs/SDK_USAGE.md)
 
 > 2026-09-29 话题演变预研：饭团语义、持续转话题与启动方式见 [交接说明](docs/topic-evolution.md)。

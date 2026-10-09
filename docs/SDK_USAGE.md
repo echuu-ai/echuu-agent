@@ -3,14 +3,16 @@
 本次改动基于 dev 的 `72f50d81ff22693d5389b6b2705b58e71657fcc6`。
 现已提供 U1 配置和 U2/U3 的 LiveSession 门面，公开契约见下文。
 下游应依赖经过验证的 wheel 或完整提交，不直接跟随移动的 dev 分支。
-当前工作区尚未发布；验收版本为 `0.2.0a4`，不同构建以制品 SHA-256 区分。
+下游当前验收制品为 `0.2.0.dev2+g2c6f5df384a9`，源码提交 `2c6f5df384a966c896dde6e72d3ded8a1566f1ff`。
+尚未作为正式 Release 发布；版本由干净 Git 提交派生，不覆盖同版本制品。
+交付入口与安装验证见 [SDK_HANDOFF.md](SDK_HANDOFF.md)。
 
 ## 构建与安装
 
 ```bash
-uv build
-# 在宿主项目中添加实际构建的 wheel，再由 uv 更新锁文件
-uv add /absolute/path/to/echuu-0.2.0a4-py3-none-any.whl
+uv run --no-project scripts/build_sdk.py --out-dir /tmp/echuu-sdk-new-build
+# 将实际产物路径传给宿主 uv；不要从未构建源码安装 0+unbuilt
+uv add /absolute/path/to/echuu-<构建版本>-py3-none-any.whl
 ```
 
 Python 包支持 Python >=3.10。源码 Web 预研应用使用 `asyncio.timeout_at`，
@@ -19,7 +21,7 @@ Web 应用仍在源码目录中，不随 wheel 发布。
 
 基础 wheel 包含 Qwen TTS 实现。MP3 转换需要 `audio` extra 中的 pydub，
 以及宿主安装的 ffmpeg；基础 WAV 输出不需要它们。
-安装时可使用 `uv add '/absolute/path/to/echuu-0.2.0a4-py3-none-any.whl[audio]'`。
+安装时可使用 `uv add '/absolute/path/to/echuu-<构建版本>-py3-none-any.whl[audio]'`。
 `all` 包含 audio/web/notebook/dev。Pydantic 2 现在是直接声明的依赖。
 其余模型依赖暂时保留：根包仍公开导出各 provider，完整的延迟导入拆分需要后续改造。
 
