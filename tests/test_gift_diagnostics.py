@@ -142,3 +142,17 @@ def test_last_chunk_alone_cannot_claim_whole_rewritten_line_played():
         assert runtime.snapshot()[0]["status"] == "applied"
     finally:
         runtime.close()
+
+
+def test_configured_model_budget_reserves_half_remaining_time_for_audio():
+    from types import SimpleNamespace
+
+    runtime, engine, _lines, _response = rig()
+    engine.config = SimpleNamespace(gift_model_timeout_seconds=8)
+    try:
+        runtime.prepare(batch().model_copy(update={"start_within": 6}), True)
+        assert 2.9 < runtime.snapshot()[0]["budget_seconds"] <= 3
+        runtime.finish("gift", False)
+        assert runtime.snapshot()[0]["reason"] == "ack_not_played"
+    finally:
+        runtime.close()

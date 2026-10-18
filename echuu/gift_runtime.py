@@ -127,6 +127,10 @@ class GiftRuntime:
         originals = [line.text for _, _, line in targets]
         thanks = "谢谢大家送来的礼物，心意都收到啦！"
         result = None
+        model_budget = min(
+            getattr(getattr(e, "config", None), "gift_model_timeout_seconds", 2),
+            max(0.001, (batch.start_within - (monotonic() - started)) / 2),
+        )
         reason = (
             "preview" if not allow_effect else "no_pending" if not targets else None
         )
@@ -142,7 +146,7 @@ class GiftRuntime:
             played_lines=0,
             model_seconds=0,
             preparation_seconds=0,
-            budget_seconds=min(2, batch.start_within),
+            budget_seconds=model_budget,
             lines=[],
         )
         self.evidence = [*self.evidence[-19:], evidence]
@@ -151,7 +155,7 @@ class GiftRuntime:
             self.future = self.pool.submit(self._propose, batch, targets)
             model_started = monotonic()
             try:
-                result = self.future.result(timeout=min(2, batch.start_within))
+                result = self.future.result(timeout=model_budget)
                 thanks = result.acknowledgement
                 evidence["acknowledgement"] = "model"
                 evidence["selected_gift_id"] = result.selected_gift_id

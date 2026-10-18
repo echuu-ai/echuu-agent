@@ -54,6 +54,9 @@ class EngineConfig(BaseModel):
     output_dir: Path | None = None
     story_pipeline: Literal["legacy_v4", "refactor", "harness_story_v1"] = "legacy_v4"
     clip_model: str = "qwen3-max"
+    gift_model_timeout_seconds: float = Field(
+        default=2, gt=0, le=8, allow_inf_nan=False
+    )
     tts: TTSConfig = Field(default_factory=TTSConfig)
 
     @classmethod
