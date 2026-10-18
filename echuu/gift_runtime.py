@@ -180,6 +180,10 @@ class GiftRuntime:
             model_seconds=0,
             preparation_seconds=0,
             budget_seconds=model_budget,
+            audio_seconds=0,
+            ack_audio_seconds=0,
+            audio_chunks=0,
+            audio_tasks=[],
             lines=[],
         )
         self.evidence = [*self.evidence[-19:], evidence]
@@ -212,38 +216,81 @@ class GiftRuntime:
             reason = reason or "model_busy"
         if result is None and not approve_reply(e, thanks):
             raise ValueError("Fallback thanks rejected by content guard")
-        try:
-            audio = e.tts.synthesize(thanks)
-        except Exception:
-            evidence.update(status="not_applied", reason="audio_failed")
-            raise
-        if not audio:
-            evidence.update(status="not_applied", reason="audio_failed")
-            raise ValueError("Gift acknowledgement audio unavailable")
-        replacements = []
-        if result and result.sentences:
-            from .live.breath import chunk_text
+        from .live.breath import chunk_text
 
-            deadline = started + batch.start_within
-            fork = e.tts.fork_preparation()
+        # Submit the whole bounded batch to one isolated two-worker voice pool.
+        # Playback still waits for complete candidate audio and the original deadline.
+        audio_started = monotonic()
+        deadline = started + batch.start_within
+        fork = e.tts.fork_preparation()
+        replacements = []
+        audio_tasks = []
+        try:
+            acknowledgement = fork.prepare(thanks)
+            audio_tasks.append(("acknowledgement", 0, 0, acknowledgement))
+            jobs = []
+            if result:
+                for line_index, ((_, _, line), old, new) in enumerate(
+                    zip(targets, originals, result.sentences)
+                ):
+                    if old != new:
+                        chunks = [
+                            (index, chunk, fork.prepare(chunk))
+                            for index, chunk in enumerate(chunk_text(new) or [new])
+                        ]
+                        audio_tasks.extend(
+                            ("rewrite", line_index, index, future)
+                            for index, _, future in chunks
+                        )
+                        jobs.append((line, old, new, chunks))
+            evidence["audio_chunks"] = 1 + sum(len(job[3]) for job in jobs)
+            audio = acknowledgement.result(timeout=max(0.001, deadline - monotonic()))
+            evidence["ack_audio_seconds"] = round(monotonic() - audio_started, 3)
+            if not audio:
+                raise ValueError("Gift acknowledgement audio unavailable")
             try:
-                for (_, _, line), old, new in zip(targets, originals, result.sentences):
+                for line, old, new, chunks in jobs:
                     prepared = {}
-                    for index, chunk in enumerate(chunk_text(new) or [new]):
-                        value = fork.prepare(chunk).result(
-                            timeout=max(0.01, deadline - monotonic())
+                    for index, chunk, future in chunks:
+                        value = future.result(
+                            timeout=max(0.001, deadline - monotonic())
                         )
                         if not value:
                             raise ValueError("Gift rewrite audio unavailable")
                         prepared[(line.id, index, chunk)] = value
-                    if old != new:
-                        replacements.append((line, old, new, prepared))
+                    replacements.append((line, old, new, prepared))
             except Exception as exc:  # noqa: BLE001 — optional effect audio failure keeps original
                 replacements = []
                 logger.info("Gift effect retained original: %s", type(exc).__name__)
                 reason = "audio_failed"
-            finally:
-                fork.close_preparation()
+        except Exception:
+            evidence.update(status="not_applied", reason="audio_failed")
+            raise
+        finally:
+            fork.close_preparation()
+            evidence["audio_seconds"] = round(monotonic() - audio_started, 3)
+            evidence["preparation_seconds"] = round(monotonic() - started, 3)
+            evidence["audio_tasks"] = [
+                {
+                    "kind": kind,
+                    "line_index": line_index,
+                    "chunk_index": chunk_index,
+                    **{
+                        key: timing[key]
+                        for key in (
+                            "queue_seconds",
+                            "synthesis_seconds",
+                            "attempts",
+                            "status",
+                        )
+                        if key in timing
+                    },
+                }
+                for kind, line_index, chunk_index, future in audio_tasks
+                if isinstance(
+                    timing := getattr(future, "preparation_timing", None), dict
+                )
+            ]
         if reason is None and not replacements:
             reason = "unchanged"
         evidence.update(

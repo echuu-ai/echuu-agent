@@ -30,9 +30,22 @@ def test_reuses_audio_and_regenerates_only_changed_text_or_voice():
         assert synth.call_count == 3
     t.close_preparation()
 
+
+def test_partial_breath_group_is_never_cached_as_complete_speech():
+    import pytest
+    from echuu.live.breath import synthesize_with_breath
+
+    with pytest.raises(RuntimeError, match="no audio"):
+        synthesize_with_breath(lambda text: b"audio" if "第一" in text else b"", "第一组台词；第二组台词。", strict=True)
+
 def test_retries_failed_audio_once_and_does_not_cache_silence():
     t = client()
     with patch('echuu.live.breath.synthesize_with_breath', side_effect=[b'', b'voice']) as synth:
         assert t.prepare('句子').result() == b'voice'
         assert synth.call_count == 2
+        timing = t.prepare('句子').preparation_timing
+        assert timing['attempts'] == 2
+        assert timing['synthesis_seconds'] >= 0
+        assert timing['queue_seconds'] >= 0
+        assert timing['status'] == 'ready'
     t.close_preparation()

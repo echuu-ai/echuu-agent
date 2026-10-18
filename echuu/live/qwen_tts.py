@@ -9,6 +9,7 @@ import os
 import re
 import struct
 import threading
+from time import monotonic
 from datetime import datetime
 from typing import Callable, List, Optional
 
@@ -270,11 +271,17 @@ class QwenRealtimeCallback(QwenTtsRealtimeCallback):
             else:
                 self.file = open(save_path, "wb")
         self.complete_event = threading.Event()
+        self.session_ready_event = threading.Event()
+        self.failed = False
 
     def on_open(self) -> None:
         diagnostic("[TTS] Realtime 连接建立")
 
     def on_close(self, close_status_code, close_msg) -> None:
+        if not self.complete_event.is_set():
+            self.failed = True
+            self.complete_event.set()
+            self.session_ready_event.set()
         # 如果是PCM格式，需要转换为WAV再保存
         if self.save_path and self.response_format == "pcm" and self.audio_buffer.tell() > 0:
             pcm_data = self.audio_buffer.getvalue()
@@ -296,6 +303,8 @@ class QwenRealtimeCallback(QwenTtsRealtimeCallback):
                     return
             
             event_type = response.get("type")
+            if event_type == "session.updated":
+                self.session_ready_event.set()
             # print(f"[TTS] on_event: {event_type}")
             
             if event_type == "response.audio.delta":
@@ -314,6 +323,8 @@ class QwenRealtimeCallback(QwenTtsRealtimeCallback):
                 self.complete_event.set()
             
             if event_type == "error":
+                self.failed = True
+                self.session_ready_event.set()
                 diagnostic(f"[TTS] 收到错误事件: {response}")
                 self.complete_event.set()
                 
@@ -416,6 +427,7 @@ class CosyVoiceTTS:
         return RealtimeAudioFormat.PCM_24000HZ_MONO_16BIT
 
     def _synthesize_realtime(self, text: str, save_path: str = None) -> bytes:
+        deadline = monotonic() + self.timeout
         callback = QwenRealtimeCallback(
             save_path=save_path,
             response_format=self.response_format,
@@ -462,15 +474,17 @@ class CosyVoiceTTS:
                 kwargs["instructions"] = self.instruction
 
             qwen_tts_realtime.update_session(**kwargs)
+            if not callback.session_ready_event.wait(max(0, deadline - monotonic())) or callback.failed:
+                return b""
             qwen_tts_realtime.append_text(text)
             if self.mode == "commit":
                 qwen_tts_realtime.commit()
             qwen_tts_realtime.finish()
 
-            completed = callback.wait_for_complete(self.timeout)
+            completed = callback.wait_for_complete(max(0, deadline - monotonic()))
         finally:
             qwen_tts_realtime.close()
-        if not completed:
+        if not completed or callback.failed:
             diagnostic("[TTS] 等待音频超时，本句保留字幕")
             return b""
         

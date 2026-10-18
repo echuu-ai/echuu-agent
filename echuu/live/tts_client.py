@@ -10,6 +10,7 @@ import copy
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from time import monotonic
 from typing import Optional
 
 from echuu.diagnostics import diagnostic
@@ -166,23 +167,38 @@ class TTSClient:
         with self._prepare_lock:
             future = self._prepared.get(key)
             if future is None:
-                future = self._prepare_pool.submit(self._generate_prepared, voice, text)
+                timing = {"queued_at": monotonic(), "attempts": 0, "status": "queued"}
+                future = self._prepare_pool.submit(self._generate_prepared, voice, text, timing)
+                future.preparation_timing = timing
                 self._prepared[key] = future
         return future
 
     @staticmethod
-    def _generate_prepared(voice, text):
+    def _generate_prepared(voice, text, timing=None):
         from .breath import synthesize_with_breath
-        for attempt in range(2):
-            try:
-                audio = synthesize_with_breath(voice.synthesize, text, sample_rate=voice.sample_rate)
-                if audio:
-                    return audio
-                raise RuntimeError("TTS returned no audio")
-            except Exception:
-                if attempt:
-                    raise
-        raise RuntimeError("TTS failed")
+        started = monotonic()
+        if timing is not None:
+            timing.update(queue_seconds=round(started - timing["queued_at"], 3), status="running")
+        try:
+            for attempt in range(2):
+                if timing is not None:
+                    timing["attempts"] = attempt + 1
+                try:
+                    audio = synthesize_with_breath(voice.synthesize, text, sample_rate=voice.sample_rate, strict=True)
+                    if audio:
+                        if timing is not None:
+                            timing["status"] = "ready"
+                        return audio
+                    raise RuntimeError("TTS returned no audio")
+                except Exception:
+                    if attempt:
+                        raise
+            raise RuntimeError("TTS failed")
+        finally:
+            if timing is not None:
+                timing["synthesis_seconds"] = round(monotonic() - started, 3)
+                if timing["status"] != "ready":
+                    timing["status"] = "failed"
 
     def close_preparation(self):
         self._prepare_pool.shutdown(wait=False, cancel_futures=True)

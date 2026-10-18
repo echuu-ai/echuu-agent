@@ -171,3 +171,70 @@ def test_invalid_schema_reports_field_and_type_without_raw_input():
         assert "PRIVATE" not in json.dumps(item)
     finally:
         runtime.close()
+
+
+def test_gift_submits_all_audio_before_waiting_and_skips_unchanged_lines():
+    runtime, engine, lines, response = rig()
+    submitted = []
+    closed = []
+    response["sentences"][1] = lines[1].text
+
+    class AudioFuture:
+        def result(self, *, timeout):
+            assert submitted == [response["acknowledgement"], response["sentences"][0]]
+            assert 0 < timeout <= 30
+            return b"audio"
+
+    class Fork:
+        def prepare(self, text):
+            submitted.append(text)
+            return AudioFuture()
+
+        def close_preparation(self):
+            closed.append(True)
+
+    engine.tts.fork_preparation = Fork
+    engine.tts.synthesize = lambda _: (_ for _ in ()).throw(
+        AssertionError("serial thanks")
+    )
+    try:
+        runtime.prepare(batch(), True)
+        item = runtime.snapshot()[0]
+        assert item["changed_lines"] == 1
+        assert item["audio_chunks"] == 2
+        assert item["audio_seconds"] >= item["ack_audio_seconds"] >= 0
+        assert closed == [True]
+        runtime.finish("gift", True)
+        assert lines[0].text == response["sentences"][0]
+        assert lines[1].text == "原句1。"
+    finally:
+        runtime.close()
+
+
+def test_parallel_audio_failure_keeps_original_and_closes_workers():
+    runtime, engine, lines, response = rig()
+    closed = []
+
+    class Fork:
+        def prepare(self, text):
+            result = Future()
+            if text == response["sentences"][1]:
+                result.set_exception(OSError("tts failed"))
+            else:
+                result.set_result(b"audio")
+            return result
+
+        def close_preparation(self):
+            closed.append(True)
+
+    engine.tts.fork_preparation = Fork
+    try:
+        _, audio = runtime.prepare(batch(), True)
+        assert audio == b"audio"
+        runtime.finish("gift", True)
+        assert runtime.snapshot()[0]["reason"] == "audio_failed"
+        assert runtime.snapshot()[0]["changed_lines"] == 0
+        assert all(line.text.startswith("原句") for line in lines)
+        assert closed == [True]
+    finally:
+        runtime.close()
