@@ -194,7 +194,7 @@ class StorytellingDriver:
                     duration=wav.getnframes() / wav.getframerate(),
                 )
         line = payload.get("line") or {}
-        return PerformanceStep(
+        step = PerformanceStep(
             step_id=f"{self.inputs.session_id}:step:{self._index}",
             line_id=line.get("id") or f"rundown-{self._index}",
             chunk_index=line.get("chunk_index", 0),
@@ -204,6 +204,11 @@ class StorytellingDriver:
             audio=descriptor,
             audio_data=data,
         )
+        return self._gift_runtime.annotate(step) if self._gift_runtime else step
+
+    @property
+    def gift_diagnostics(self):
+        return self._gift_runtime.snapshot() if self._gift_runtime else []
 
     def export_artifacts(self):
         state = self.engine.state
@@ -287,6 +292,8 @@ class StorytellingDriver:
         return diagnostics
 
     def played(self, step: PerformanceStep):
+        if self._gift_runtime:
+            self._gift_runtime.played(step)
         self._spoken.append(step.speech)
         self.engine.state.spoken_history = [
             *self.engine.state.spoken_history,
