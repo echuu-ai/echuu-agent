@@ -33,9 +33,11 @@ class StorytellingDriver:
         options: SessionOptions,
         *,
         engine=None,
+        prepared_story=None,
     ):
         self.inputs, self.config, self.options = inputs, config, options
         self.engine = engine
+        self.prepared_story = prepared_story
         self._own_engine = engine is None
         self._generator = None
         self._first_body = None
@@ -93,7 +95,8 @@ class StorytellingDriver:
         e.on_token_hunt = self._diagnostics.append
         self._card = PersonaCard.from_dict(value.persona_card)
         self._brief = (
-            produce_topic_brief(e.llm, value.topic) if self.options.grounding else ""
+            produce_topic_brief(e.llm, value.topic)
+            if self.options.grounding and self.prepared_story is None else ""
         )
         background = f"【本次用户设定·故事前提】{value.background}\n本次主题：{value.topic}\n保留用户人设与明确虚构设定；现实产品和新闻若与最新有来源的事实冲突，应更正旧背景，不得默认把真实事件当成虚构。"
         if value.memory:
@@ -111,17 +114,21 @@ class StorytellingDriver:
                 future = opening_pool.submit(
                     self._rundown, "opening", e.tts.fork_preparation()
                 )
-            e.setup(
-                name=value.name,
-                persona=value.persona,
-                topic=value.topic,
-                background=background,
-                language=value.language,
-                persona_card=value.persona_card,
-                on_phase_callback=lambda _: self._diagnostics.append(
-                    {"type": "reasoning", "content": "正在准备内容"}
-                ),
-            )
+            if self.prepared_story is not None:
+                from .prepared_story import load_story
+                load_story(e, self.prepared_story)
+            else:
+                e.setup(
+                    name=value.name,
+                    persona=value.persona,
+                    topic=value.topic,
+                    background=background,
+                    language=value.language,
+                    persona_card=value.persona_card,
+                    on_phase_callback=lambda _: self._diagnostics.append(
+                        {"type": "reasoning", "content": "正在准备内容"}
+                    ),
+                )
             if future:
                 try:
                     self._opening.extend(
