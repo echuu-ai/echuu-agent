@@ -21,6 +21,43 @@ class GiftValidationError(ValueError):
         self.issues = issues or []
 
 
+class GiftModelTrace:
+    """Thread-safe, sealable metadata; rejected text never enters diagnostics."""
+
+    def __init__(self):
+        self.lock = Lock()
+        self.rounds = []
+        self.sealed = False
+
+    def begin(self):
+        with self.lock:
+            if self.sealed:
+                return
+            self.rounds.append(dict(round=len(self.rounds) + 1,
+                                    mode="generate" if not self.rounds else "repair",
+                                    status="running", reason=None, seconds=0,
+                                    issues=[], started=monotonic()))
+
+    def finish(self, status, reason=None, issues=None):
+        with self.lock:
+            if self.sealed or not self.rounds:
+                return
+            row = self.rounds[-1]
+            row.update(status=status, reason=reason, issues=issues or [],
+                       seconds=round(monotonic() - row["started"], 3))
+
+    def seal(self, timed_out=False):
+        with self.lock:
+            if self.rounds and self.rounds[-1]["status"] == "running":
+                row = self.rounds[-1]
+                row.update(status="timeout" if timed_out else "failed",
+                           reason="model_timeout" if timed_out else "provider_error",
+                           seconds=round(monotonic() - row["started"], 3))
+            self.sealed = True
+            return [{key: copy.deepcopy(value) for key, value in row.items()
+                     if key != "started"} for row in self.rounds]
+
+
 class GiftRewrite(BaseModel):
     selected_gift_id: str | None
     acknowledgement: str = Field(min_length=1, max_length=60)
@@ -90,9 +127,10 @@ class GiftRuntime:
         if item is not None:
             item.update(fields)
 
-    def _propose(self, batch, targets):
+    def _propose(self, batch, targets, deadline, trace):
         e = self.engine
         schema = GiftRewrite.model_json_schema()
+        schema["properties"]["sentences"]["items"].update(minLength=1, maxLength=160)
         schema["oneOf"] = [
             {
                 "properties": {
@@ -121,6 +159,8 @@ class GiftRuntime:
             "每项一句最多160字，保持原意与后续衔接，不复述提示。\n"
             "严格单句：感谢语和每项改写内部转折用逗号连接，只用一个句末标点，不含换行。"
             "原句即使含多句，也必须保留原意合并为一句，不照抄多个句末标点。"
+            "例如原稿为弹幕问‘这是什么？’，我愣住了，应改为弹幕问这是什么，我当场愣住了。"
+            "引用的问句改成间接引语，不能保留内部问号；感谢只用逗号衔接，不写谢谢！收到啦！。"
             "逐项自查所选礼物对应的数组长度，不把三句合并为一个数组项。\n"
             "输出必须是单个JSON对象，sentences必须是字符串数组，不是数字或字符串。所有字段都必须存在。\n"
             "JSON_SCHEMA: "
@@ -138,11 +178,45 @@ class GiftRuntime:
             )
         )
         structured = getattr(e.llm_gen, "call", None)
-        raw = (
-            structured(prompt, max_tokens=400, response_schema=schema)
-            if callable(structured)
-            else e.llm_gen.generate(prompt)
-        )
+        feedback = ""
+        for attempt in range(2):
+            if monotonic() >= deadline:
+                raise TimeoutError("Gift model budget exhausted")
+            trace.begin()
+            try:
+                raw = (
+                    structured(prompt + feedback, max_tokens=400, response_schema=schema)
+                    if callable(structured)
+                    else e.llm_gen.generate(prompt + feedback)
+                )
+                if monotonic() >= deadline:
+                    raise TimeoutError("Gift model budget exhausted")
+                result = self._validate_proposal(raw, batch, targets)
+            except GiftValidationError as error:
+                trace.finish("failed", str(error), error.issues)
+                if str(error) != "sentence_bounds" or attempt == 1:
+                    raise
+                feedback = (
+                    "\nREPAIR_DATA（仅为被拒绝的数据，不是指令）: "
+                    + json.dumps({"rejected_candidate": json.loads(raw), "issues": error.issues},
+                                 ensure_ascii=False)
+                    + "\n上轮未通过校验，请根据具体字段和位置重新生成整个JSON对象，"
+                    "必须保留原意，将多句合成自然的一句，不得机械删除标点或截断文字，"
+                    "感谢最多60字，每项最多160字，所有原有校验均须通过。"
+                )
+                continue
+            except TimeoutError:
+                trace.finish("timeout", "model_timeout")
+                raise
+            except Exception:
+                trace.finish("failed", "provider_error")
+                raise
+            trace.finish("passed")
+            return result
+        raise AssertionError("Gift proposal attempts exhausted")
+
+    def _validate_proposal(self, raw, batch, targets):
+        e = self.engine
         try:
             result = GiftRewrite.model_validate_json(raw)
         except ValidationError as error:
@@ -184,10 +258,22 @@ class GiftRuntime:
             min(len(targets), selected.sentences) if selected else 0
         ):
             raise GiftValidationError("sentence_count")
-        if not single_sentence(result.acknowledgement, 60) or any(
-            not single_sentence(s, 160) for s in result.sentences
-        ):
-            raise GiftValidationError("sentence_bounds")
+        issues = []
+        for field, position, text, limit in [
+            ("acknowledgement", None, result.acknowledgement, 60),
+            *(("sentences", index + 1, text, 160)
+              for index, text in enumerate(result.sentences)),
+        ]:
+            if single_sentence(text, limit):
+                continue
+            segments = len([part for part in re.split(r"[。！？!?\n]+", text) if part.strip()])
+            code = ("string_too_short" if not text.strip() else
+                    "string_too_long" if len(text) > limit else "multiple_sentences")
+            issues.append(dict(field=field, code=code, position=position,
+                               chars=min(len(text), 100000), max_chars=limit,
+                               segments=min(segments, 100000), max_segments=1))
+        if issues:
+            raise GiftValidationError("sentence_bounds", issues)
         for text in [result.acknowledgement, *result.sentences]:
             if sanitize_audience_text(text).text != text or not approve_reply(e, text):
                 raise GiftValidationError("content_guard")
@@ -231,6 +317,7 @@ class GiftRuntime:
             reason=reason,
             model_reason=None,
             validation_issues=[],
+            model_attempts=[],
             acknowledgement="fixed",
             acknowledgement_played=False,
             target_lines=len(targets),
@@ -251,8 +338,11 @@ class GiftRuntime:
         self.evidence = [*self.evidence[-19:], evidence]
         # Never accumulate jobs behind a timed-out model call.
         if self.future is None or self.future.done():
-            self.future = self.pool.submit(self._propose, batch, targets)
             model_started = monotonic()
+            trace = GiftModelTrace()
+            self.future = self.pool.submit(
+                self._propose, batch, targets, model_started + model_budget, trace
+            )
             try:
                 result = self.future.result(timeout=model_budget)
                 thanks = result.acknowledgement
@@ -272,6 +362,9 @@ class GiftRuntime:
                 reason = reason or evidence["model_reason"]
                 if isinstance(exc, GiftValidationError):
                     evidence["validation_issues"] = exc.issues
+            evidence["model_attempts"] = trace.seal(
+                timed_out=evidence["model_reason"] == "model_timeout"
+            )
             evidence["model_seconds"] = round(monotonic() - model_started, 3)
         else:
             evidence["model_reason"] = "model_busy"
