@@ -68,11 +68,11 @@ def test_invalid_structure_is_repaired_before_any_script_is_returned(invalid):
 
 
 def test_second_repair_receives_the_remaining_character_deficit():
-    lines, writer, trace = generate([draft(short=True), draft(short=True), draft()])
+    lines, writer, trace = generate([draft(short=True), draft(short=True), {"line_id": "L001", "continuation": "接下来我们核对连接、音轨和回执，每做完一步才继续下一步。遇到问题时就能知道停在哪里，不凭按钮颜色宣布成功。"}])
     assert len(lines) == 7
     assert len(writer.prompts) == 4
     assert "min_chars" in writer.prompts[-1]
-    assert "missing_chars" in writer.prompts[-1]
+    assert "minimum_additional_chars" in writer.prompts[-1]
     assert trace["draft_attempts"][0]["chars"] == 251
     assert trace["budget"]["min_chars"] <= sum(len(line.text) for line in lines) <= trace["budget"]["max_chars"]
 
@@ -90,3 +90,31 @@ def test_direct_validation_stays_strict():
     with pytest.raises(ValueError, match="5..10"):
         validate_draft(draft(beats=4), {"min_chars": 264, "max_chars": 506}, {})
     assert any(issue["code"] == "duration" for issue in validate_draft(draft(short=True), {"min_chars": 264, "max_chars": 506}, {}))
+
+
+def test_short_draft_is_expanded_without_rewriting_valid_beats_or_quotes():
+    original = draft(short=True)
+    continuation = "接下来我们逐一核对连接提示、音轨名称和播放完成时间，每做完一步才继续下一步。这样遇到问题时，就能准确知道停在哪里，而不会只凭按钮亮起就宣布已经成功。"
+    lines, writer, trace = generate([original, original, {"line_id": "L001", "continuation": continuation}])
+    assert lines[0].text == original["lines"][0]["text"] + continuation
+    assert [line.text for line in lines[1:]] == [line["text"] for line in original["lines"][1:]]
+    assert trace["final_draft"]["quotables"] == original["quotables"]
+    assert trace["draft_attempts"][-1]["mode"] == "expand_beat"
+    assert "minimum_additional_chars" in writer.prompts[-1]
+    assert not validate_draft(trace["final_draft"], trace["budget"], {})
+
+
+def test_failed_expansion_exposes_counts_without_accepting_short_text():
+    from echuu.generators.shareable_clip import ClipValidationError
+    with pytest.raises(ClipValidationError) as caught:
+        generate([draft(short=True), draft(short=True), *[{"line_id": line, "continuation": text} for line, text in [("L001", "继续检查"), ("L002", "核对状态"), ("L003", "确认结果")]]])
+    assert caught.value.details["chars"] < caught.value.details["min_chars"]
+    assert caught.value.details["issues"][0]["code"] == "duration"
+
+
+def test_small_remaining_deficit_gets_another_targeted_expansion_within_call_cap():
+    lines, writer, trace = generate([draft(short=True), draft(short=True), {"line_id": "L001", "continuation": "后续逐项核对状态。"}, {"line_id": "L002", "continuation": "这次我们先核对房间里的参与者，再检查音轨是否已经发布。每一步都以实际结果为准，发现异常时记录原因，处理完成以后再继续。"}])
+    assert trace["draft_attempts"][2]["chars"] == 260
+    assert trace["draft_attempts"][3]["mode"] == "expand_beat"
+    assert len(writer.prompts) == 5 and trace["calls"] <= 6
+    assert sum(len(line.text) for line in lines) >= trace["budget"]["min_chars"]

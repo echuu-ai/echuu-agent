@@ -73,15 +73,48 @@ def repair_constraints(obj, budget):
     }
 
 
+class ClipValidationError(ValueError):
+    """Expose bounded validation facts to hosts without leaking model output."""
+
+    def __init__(self, problems, budget, chars):
+        self.details = {'issues': problems, 'chars': chars, 'min_chars': budget['min_chars'], 'max_chars': budget['max_chars']}
+        super().__init__('clip constraints unresolved: ' + json.dumps(problems, ensure_ascii=False))
+
+
+def expand_short_draft(call, draft, data, plan, budget):
+    """Ask for substantive continuation of one beat; preserve all accepted text and quotes."""
+    chars = sum(len(line['text']) for line in draft['lines'])
+    line = min(draft['lines'], key=lambda item: len(item['text']))
+    schema = {'type': 'object', 'properties': {'line_id': {'type': 'string'}, 'continuation': {'type': 'string'}}, 'required': ['line_id', 'continuation'], 'additionalProperties': False}
+    prompt = '''只补写指定段落的一段自然续文，不重写整稿，不返回其他段落。
+把原段落已有事实解释清楚，补入有信息量的步骤、因果或简短对话。每句简短，但续文总字数必须达到 minimum_additional_chars。
+不得复述原句、填充空话、编造已收到的观众互动或把未知情况说成已经验证成功。
+返回 {"line_id":"指定ID","continuation":"直接接在原段落之后的台词"}，不要重复原段落。
+DATA:\n''' + json.dumps({'input': data, 'plan': plan, 'draft': draft, 'line_id': line['id'], 'minimum_additional_chars': min(budget['max_chars'] - chars, max(80, budget['min_chars'] - chars + 40)), 'maximum_additional_chars': budget['max_chars'] - chars}, ensure_ascii=False)
+    expansion = call(prompt, repair_mode=True, response_schema=schema)
+    if not isinstance(expansion, dict) or expansion.get('line_id') != line['id'] or not isinstance(expansion.get('continuation'), str) or not expansion['continuation'].strip():
+        raise ValueError('invalid beat expansion')
+    return {**draft, 'lines': [{**item, 'text': item['text'] + expansion['continuation']} if item['id'] == line['id'] else dict(item) for item in draft['lines']]}
+
+
 def generate_valid_draft(call, prompt, data, plan, selected, budget, config, trace):
-    """Repair malformed or undersized drafts at most twice, then fail closed."""
+    """Repair drafts, then expand short beats within the unchanged six-call budget."""
     obj = None
     problems = []
     trace['draft_attempts'] = []
-    for attempt in range(3):
+    for attempt in range(5):
+        previous = obj
+        shortfall = isinstance(previous, dict) and len(problems) == 1 and problems[0].get('code') == 'duration' and problems[0].get('chars', 0) < budget['min_chars']
+        if attempt > 2 and not shortfall:
+            break
         obj = None
+        mode = 'full_draft'
         try:
-            obj = call(prompt, repair_mode=attempt > 0)
+            if attempt >= 2 and shortfall:
+                mode = 'expand_beat'
+                obj = expand_short_draft(call, previous, data, plan, budget)
+            else:
+                obj = call(prompt, repair_mode=attempt > 0)
             problems = validate_draft(obj, budget, config)
         except (ValueError, TypeError, KeyError, AttributeError) as exc:
             # A bad model response is repairable; it must never escape the final
@@ -89,7 +122,7 @@ def generate_valid_draft(call, prompt, data, plan, selected, budget, config, tra
             problems = [{'code': 'format', 'reason': str(exc)[:200]}]
         constraints = repair_constraints(obj, budget)
         trace['draft_attempts'].append({
-            'attempt': attempt + 1, 'issues': problems,
+            'attempt': attempt + 1, 'mode': mode, 'issues': problems,
             'chars': constraints['current_chars'],
         })
         if attempt == 0:
@@ -110,7 +143,7 @@ DATA:\n''' + json.dumps({
             'issues': problems, 'constraints': constraints,
         }, ensure_ascii=False)
     trace['remaining_issues'] = problems
-    raise ValueError('clip constraints unresolved: ' + json.dumps(problems, ensure_ascii=False))
+    raise ClipValidationError(problems, budget, constraints['current_chars'])
 
 
 def generate_clip(owner,name,persona,background,topic,language,config):
@@ -124,12 +157,12 @@ def generate_clip(owner,name,persona,background,topic,language,config):
     budget={'target_seconds':target,'min_chars':round(60*cps),'max_chars':round(min(120,target+25)*cps),'estimate_scope':'planning only; final WAV must be 60..120 seconds'}
     trace={'version':'legacy-v4-shareable-v1','status':'generating','budget':budget,'calls':0,'raw_outputs':[]}
     owner.last_trace=trace
-    def call(prompt, review_mode=False, repair_mode=False):
+    def call(prompt, review_mode=False, repair_mode=False, response_schema=None):
         if trace['calls']>=6:raise ValueError('clip call budget exhausted')
         trace['calls']+=1
         call_start=time.perf_counter()
         caller = getattr(owner.llm, 'call_structured', None)
-        options = {'response_schema': DRAFT_SCHEMA if 'plan' in trace else PLAN_SCHEMA} if callable(caller) else {}
+        options = {'response_schema': response_schema or (DRAFT_SCHEMA if 'plan' in trace else PLAN_SCHEMA)} if callable(caller) else {}
         caller = caller if callable(caller) else owner.llm.call
         raw=caller(prompt,system=("你是证据审查器。对照DATA.input的人设、background和topic审查DATA.draft；草稿否定用户给定的已发生事件、替换其核心对象或虚构已收到的观众互动，必须引用原句并判revise，不能作为幽默豁免。不创作、不润色、不推测不存在的原作规则。id必须复制已有L001格式，quote必须逐字复制对应行中的连续子串，不加行号、引号或省略。时长由程序检查，禁止为时长创造虚拟行。人物正常提问、回顾时态、普通动作不自动构成问题。只判断叙述事实之间真实无法共存的矛盾。角色对话中的嘴硬、撒谎、误会、反话不是事实约束；例如他说顺路实际绕远正是笑点，绝不能当逻辑冲突。叙述者从对方行为推断动机是允许的，无需对方亲口承认。只判断明确事实冲突或听不懂的因果。资料没写某个普通细节不等于冲突；比喻不是物理事实，正常目测/触感、后来发生的事无需逐步铺垫。禁止把个人文风偏好当成错误，偏好写在preferences。每个reason最多60字。最多3个问题。返回指定JSON。" if review_mode else "你是口语脚本修复编辑。必须真正修改被指出的问题；禁止复述原稿或解释修改。按用户要求返回正文JSON和引用句。以DATA.input给定事实为准；草稿中与其冲突的情节必须改掉，不能保留为反转。事实和人物关系保留，删除花哨动作特写及不是X是Y句式，直接说事件。修复时长靠新增有因果的对话，不能重复和升华。" if repair_mode else SYSTEM),max_tokens=3000,**options);trace['raw_outputs'].append(raw)
         trace.setdefault('call_details',[]).append({'review_mode':review_mode,'seconds':round(time.perf_counter()-call_start,3),'input_sha256':hashlib.sha256(prompt.encode()).hexdigest()})
