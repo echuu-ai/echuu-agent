@@ -88,6 +88,7 @@ exclude = ["echuu-web*", "workflow*", "data*", "output*", "docs*"]
 
 [tool.setuptools.package-data]
 echuu = ["py.typed", "_build.json"]
+"echuu.harness" = ["patterns.json"]
 
 [tool.setuptools.dynamic]
 version = {attr = "echuu._version.__version__"}
