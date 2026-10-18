@@ -19,6 +19,9 @@ def test_gift_uses_bounded_structured_call_and_waits_for_real_playback():
         runtime.prepare(batch(), True)
         assert requests[0]["response_schema"]["properties"]["sentences"]
         assert requests[0]["max_tokens"] == 400
+        choices = requests[0]["response_schema"]["oneOf"]
+        assert choices[0]["properties"]["sentences"] == {"minItems": 2, "maxItems": 2}
+        assert choices[-1]["properties"]["selected_gift_id"] == {"const": None}
         assert runtime.snapshot()[0]["status"] == "prepared"
         runtime.finish("gift", True)
         assert runtime.snapshot()[0]["status"] == "applied"
