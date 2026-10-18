@@ -29,6 +29,7 @@ SYSTEM = """你是直播杂谈编剧。交付一个观众愿意转给朋友的�
 def validate_draft(obj, budget, config):
     lines=obj.get('lines',[])
     if not isinstance(lines,list) or not 5<=len(lines)<=10:raise ValueError('clip needs 5..10 beats')
+    if any(not isinstance(line,dict) for line in lines):raise ValueError('invalid clip line')
     if [l.get('id') for l in lines]!=[f'L{i+1:03d}' for i in range(len(lines))]:raise ValueError('invalid clip IDs')
     if any(not isinstance(l.get('text'),str) or not l['text'].strip() for l in lines):raise ValueError('invalid text')
     chars=sum(len(l['text']) for l in lines)
@@ -51,6 +52,65 @@ def validate_review(review, obj):
         if issue.get('id') not in known or not issue.get('quote') or issue['quote'] not in known[issue['id']]:raise ValueError('invented review evidence')
     if (review['verdict']=='pass')!= (not issues):raise ValueError('contradictory review verdict')
     return issues
+
+
+def repair_constraints(obj, budget):
+    """Describe the unchanged acceptance limits and the concrete size deficit."""
+    lines = obj.get('lines', []) if isinstance(obj, dict) else []
+    if not isinstance(lines, list):
+        lines = []
+    chars = sum(
+        len(line['text']) for line in lines
+        if isinstance(line, dict) and isinstance(line.get('text'), str)
+    )
+    return {
+        'min_beats': 5, 'max_beats': 10, 'preferred_beats': 7,
+        'ids': 'L001, L002, ... in order, one ID per beat',
+        'min_chars': budget['min_chars'], 'max_chars': budget['max_chars'],
+        'current_chars': chars, 'missing_chars': max(0, budget['min_chars'] - chars),
+        'excess_chars': max(0, chars - budget['max_chars']),
+        'quotables': '1..2 exact substrings from the referenced spoken line',
+    }
+
+
+def generate_valid_draft(call, prompt, data, plan, selected, budget, config, trace):
+    """Repair malformed or undersized drafts at most twice, then fail closed."""
+    obj = None
+    problems = []
+    trace['draft_attempts'] = []
+    for attempt in range(3):
+        obj = None
+        try:
+            obj = call(prompt, repair_mode=attempt > 0)
+            problems = validate_draft(obj, budget, config)
+        except (ValueError, TypeError, KeyError, AttributeError) as exc:
+            # A bad model response is repairable; it must never escape the final
+            # structure/content validator or become a partially accepted script.
+            problems = [{'code': 'format', 'reason': str(exc)[:200]}]
+        constraints = repair_constraints(obj, budget)
+        trace['draft_attempts'].append({
+            'attempt': attempt + 1, 'issues': problems,
+            'chars': constraints['current_chars'],
+        })
+        if attempt == 0:
+            trace['initial_draft'] = obj
+            trace['initial_issues'] = problems
+        if not problems:
+            return obj
+        prompt = '''修复本次直播草稿，返回完整正文 JSON，不返回补丁或解释。
+保留本次人设、事实和话题。简短表达指每句简洁，不得减少所要求的段落数或总字数。
+按 constraints 补足有实际信息的对话和步骤，优先写7段，每段2至3个简短句子；
+总字数必须在 min_chars 与 max_chars 内，missing_chars 是当前至少还缺少的字数。
+不得重复同一段、堆砌空话、增添舞台说明或编造已发生的观众互动来补字数。
+段落 ID 从 L001 连续编号；每段 text 为非空台词。quotables 必须逐字来自对应正文。
+严格输出 {"lines":[{"id":"L001","text":"台词"}],"quotables":[{"line_id":"L001","quote":"正文原文","why_shareable":"原因"}]}。
+DATA:\n''' + json.dumps({
+            'input': data, 'plan': plan, 'selected': selected, 'draft': obj,
+            'previous_output': trace['raw_outputs'][-1],
+            'issues': problems, 'constraints': constraints,
+        }, ensure_ascii=False)
+    trace['remaining_issues'] = problems
+    raise ValueError('clip constraints unresolved: ' + json.dumps(problems, ensure_ascii=False))
 
 
 def generate_clip(owner,name,persona,background,topic,language,config):
@@ -102,13 +162,7 @@ DATA:\n'''+json.dumps(data,ensure_ascii=False))
         prompt='''根据选中的事件写完整60–120秒中文口头clip。必须写7段，每段约50–65个汉字，总计约350–450字（以预算为准）。不能交一个150字的大纲。用实质对话和递进支撑，禁止重复铺垫、动作旁白、抽象感悟凑字数。开头有听下去的问题，中间至少两次新信息推进，结尾兑现开头。1–2句能单独引用的有趣话必须长在故事里，贴这个人物，不能只是给物件加人格。口吻是对直播观众聊趣事，可以有接话、复述对方的原话和轻轻吐槽；每个对话来回有实际信息，不要像默片只描写人的手、表情和动作。不要每段重新开场，不要介绍自己人设。
 返回 {lines:[{id:"L001",text:"可直接说的台词"}...5至10段],quotables:[{line_id,quote:"对应正文精确原文",why_shareable}]}。
 DATA:\n'''+json.dumps({'input':data,'plan':plan,'selected':selected},ensure_ascii=False)
-        obj=call(prompt);problems=validate_draft(obj,budget,config);trace['initial_draft']=obj;trace['initial_issues']=problems
-        # Semantic review is temporarily disabled for live recording. Keep the
-        # deterministic draft constraints and one bounded repair for those only.
-        if problems:
-            obj=call('修复草稿的程序校验问题。输出{lines:[{id,text}],quotables:[{line_id,quote,why_shareable}]}。只修复issues列出的格式、字数、引用或表达问题，保留本次人设与事实。长度在budget内。DATA:\n'+json.dumps({'input':data,'draft':obj,'issues':problems},ensure_ascii=False),repair_mode=True)
-            problems=validate_draft(obj,budget,config)
-        if problems:raise ValueError('clip constraints unresolved: '+json.dumps(problems,ensure_ascii=False))
+        obj=generate_valid_draft(call,prompt,data,plan,selected,budget,config,trace)
         trace.update(status='completed',final_draft=obj,chars=sum(len(l['text']) for l in obj['lines']),semantic_status='skipped',audio_status='not_measured')
         return [ScriptLineV4(id=l['id'],text=l['text'],stage='Hook' if i==0 else 'Resolution' if i==len(obj['lines'])-1 else 'Build-up',interruption_cost=.4,key_info=[]) for i,l in enumerate(obj['lines'])]
     except Exception as exc:

@@ -1,5 +1,20 @@
 # Python SDK 交付说明
 
+## 2026-10-18 正文草稿修复候选
+
+本地 `codex/sdk-clip-repair` 修复预生成遇到段落数/JSON 格式错误直接退出、
+以及一次字数修复仍不合规的问题。格式和内容问题均进入最多两次的完整草稿修复，
+修复提示包含实际字数、剩余字数和原有预算；最终仍执行原校验。
+5..10 段、连续 ID、非空文本、字数上下限、真实引用和既有表达限制没有放宽。
+未启用 `ECHUU_FAST_CLIP`，也未将不合格正文填充为成功结果。
+
+新增 6 个回归用例，修复前 5 failed / 1 passed，修复后相关测试 15 passed。
+现有拒绝不合格草稿的测试补足第二次模拟修复响应，仍断言拒绝及有限调用次数。
+补齐临时 Web 测试依赖后，源码全量 409 passed（6 个已有弃用警告）。
+初次全量收集缺少 fastapi/boto3，补齐后发现还缺少 sqlalchemy；
+随后使用 Web requirements 的临时环境重跑通过，未修改依赖配置。
+候选制品须通过下游真实模型、语音和回执验证后再推广；没有推送、发布或部署。
+
 本分支 `codex/sdk-baseline` 以 dev `72f50d81ff22693d5389b6b2705b58e71657fcc6` 为基础，提供可安装配置、LiveSession、礼物契约、播放确认、归档与构建工具。目标合入 dev；目前是测试候选实现，非正式稳定发行。
 
 下游当前使用源码 `2c6f5df384a966c896dde6e72d3ded8a1566f1ff` 构建的 `0.2.0.dev2+g2c6f5df384a9`。本分支之后的文档提交不改变该 wheel。下游 [集成交付指南](https://github.com/echuu-ai/echuu/blob/codex/sdk-gift-integration/docs/echuu-sdk-handoff.md) 是产品测试入口；其中 manifest 固定源码与 wheel 哈希。
