@@ -243,3 +243,39 @@ def test_parallel_audio_failure_keeps_original_and_closes_workers():
         assert closed == [True]
     finally:
         runtime.close()
+
+
+def test_absent_rewrite_preserves_primary_failure_after_ack_preparation_deadline(
+    monkeypatch,
+):
+    from echuu import gift_runtime
+
+    clock = [10.0]
+    monkeypatch.setattr(gift_runtime, "monotonic", lambda: clock[0])
+    runtime, _, lines, _ = rig()
+
+    class FailedProposal:
+        def result(self, **_):
+            clock[0] += 1
+            raise TimeoutError()
+
+        def done(self):
+            return True
+
+    class Pool:
+        def submit(self, *_):
+            return FailedProposal()
+
+        def shutdown(self, **_):
+            pass
+
+    runtime.pool.shutdown(wait=False)
+    runtime.pool = Pool()
+    try:
+        runtime.prepare(batch().model_copy(update={"start_within": 0.01}), True)
+        runtime.finish("gift", True)
+        assert runtime.snapshot()[0]["reason"] == "model_timeout"
+        assert runtime.snapshot()[0]["changed_lines"] == 0
+        assert lines[0].text == "原句0。"
+    finally:
+        runtime.close()

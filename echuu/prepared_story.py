@@ -9,8 +9,10 @@ from .session_types import Contract, SessionInput, SessionOptions
 
 
 class PreparedStory(Contract):
-    schema_version: Literal[1] = 1
-    validator_version: Literal["shareable-clip-v1"] = "shareable-clip-v1"
+    schema_version: Literal[1, 2] = 1
+    validator_version: Literal["shareable-clip-v1", "full-story-v2"] = (
+        "shareable-clip-v1"
+    )
     inputs: SessionInput
     background: str
     show: dict[str, JsonValue]
@@ -39,6 +41,16 @@ class PreparedStory(Contract):
 
         if self.sha256 != self.digest(self.model_dump(mode="json")):
             raise ValueError("Prepared story checksum mismatch")
+        expected = "full-story-v2" if self.schema_version == 2 else "shareable-clip-v1"
+        if self.validator_version != expected:
+            raise ValueError("Mismatched script validator")
+        if self.schema_version == 2:
+            from .prepared_rundown import validate_sections
+
+            if validate_sections(self.draft, self.inputs, self.background):
+                raise ValueError("Invalid selected opening/closing")
+        elif "opening" in self.draft or "closing" in self.draft:
+            raise ValueError("Legacy clips cannot contain unchecked rundown")
         card = PersonaCard.from_dict(self.inputs.persona_card)
         issues = validate_draft(
             self.draft,
@@ -109,9 +121,16 @@ def generate_story(inputs, config, options: SessionOptions, *, engine=None):
         persona_card=inputs.persona_card,
         character_config={"output_format": "shareable_clip", "target_seconds": 90},
     )
-    return PreparedStory.capture(
+    body = PreparedStory.capture(
         inputs, engine.state.show, engine._legacy_writer_trace, background=background
     )
+    from .prepared_rundown import generate_sections
+
+    sections = generate_sections(engine, inputs, background, body.draft)
+    data = body.model_dump(mode="json")
+    data.update(schema_version=2, validator_version="full-story-v2")
+    data["draft"].update(sections)
+    return PreparedStory.model_validate({**data, "sha256": PreparedStory.digest(data)})
 
 
 def load_story(engine, artifact: PreparedStory):

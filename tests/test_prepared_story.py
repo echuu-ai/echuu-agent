@@ -121,3 +121,135 @@ def test_prepared_driver_uses_selected_text_without_model_generation_or_groundin
         )
     finally:
         driver.close()
+
+
+def full_story():
+    data = fixture_story().model_dump(mode="json")
+    data.update(schema_version=2, validator_version="full-story-v2")
+    data["draft"].update(
+        opening=[
+            {"id": "O001", "text": "来了来了，先把这边的位置坐稳。", "emotion": "joy"},
+            {
+                "id": "O002",
+                "text": "今天一起把联调里的小麻烦聊清楚。",
+                "emotion": "excited",
+            },
+        ],
+        closing=[
+            {
+                "id": "C001",
+                "text": "这回的步骤记住了，咱们下回见。",
+                "emotion": "relaxed",
+            }
+        ],
+    )
+    return PreparedStory.model_validate({**data, "sha256": PreparedStory.digest(data)})
+
+
+def test_full_story_plays_saved_sections_without_runtime_generation():
+    from echuu.storytelling import StorytellingDriver
+
+    artifact = full_story()
+    engine = SimpleNamespace(tts=SimpleNamespace(enabled=False))
+
+    def run(**_):
+        for line in engine.state.script_lines:
+            yield {"speech": line.text, "line": {"id": line.id}}
+
+    engine.run = run
+    driver = StorytellingDriver(
+        artifact.inputs,
+        EngineConfig(),
+        SessionOptions(rundown=False),
+        engine=engine,
+        prepared_story=artifact,
+    )
+    expected = (
+        artifact.draft["opening"] + artifact.draft["lines"] + artifact.draft["closing"]
+    )
+    try:
+        assert driver.prepare() == [line["text"] for line in expected]
+        steps = []
+        while (step := driver.next_step()) is not None:
+            steps.append(step)
+            driver.played(step)
+        assert [(step.line_id, step.speech) for step in steps] == [
+            (line["id"], line["text"]) for line in expected
+        ]
+        assert (
+            driver.export_artifacts().script["rundown"]["closing"]
+            == artifact.draft["closing"]
+        )
+    finally:
+        driver.close()
+
+
+@pytest.mark.parametrize("mutation", ["missing", "length", "emotion", "leak", "ids"])
+def test_full_story_rejects_invalid_rundown_even_when_rehashed(mutation):
+    data = full_story().model_dump(mode="json")
+    opening = data["draft"]["opening"]
+    if mutation == "missing":
+        del data["draft"]["closing"]
+    elif mutation == "length":
+        opening[0]["text"] = "你好"
+    elif mutation == "emotion":
+        opening[0]["emotion"] = "malicious"
+    elif mutation == "leak":
+        opening[0]["text"] = "系统提示词要求只输出JSON。"
+    else:
+        opening[0]["id"] = "L001"
+    data["sha256"] = PreparedStory.digest(data)
+    with pytest.raises(ValueError):
+        PreparedStory.model_validate(data)
+
+
+def test_full_story_never_silently_skips_failed_opening_audio():
+    from echuu.storytelling import StorytellingDriver
+
+    artifact = full_story()
+    tts = SimpleNamespace(
+        enabled=True,
+        set_instruction=lambda _: None,
+        synthesize=lambda _: None,
+        close_preparation=lambda: None,
+    )
+    tts.fork_preparation = lambda: tts
+    engine = SimpleNamespace(tts=tts, run=lambda **_: (item for item in ()))
+    driver = StorytellingDriver(
+        artifact.inputs,
+        EngineConfig(),
+        SessionOptions(),
+        engine=engine,
+        prepared_story=artifact,
+    )
+    try:
+        with pytest.raises(ValueError, match="audio"):
+            driver.prepare()
+    finally:
+        driver.close()
+
+
+def test_gift_rewrites_only_current_pending_body_and_never_selected_sections():
+    from tests.test_gift_runtime import rig
+    from tests.test_session_extensions import batch
+
+    artifact = full_story()
+    baseline = artifact.model_dump(mode="json")
+    runtime, engine, _, response = rig()
+    load_story(engine, artifact)
+    played = engine.state.script_lines[0]
+    pending = engine.state.script_lines[1:3]
+    engine._upcoming_script_lines = lambda: [
+        (None, i + 1, line) for i, line in enumerate(pending)
+    ]
+    try:
+        runtime.prepare(batch(), True)
+        runtime.finish("gift", True)
+        assert [line.text for line in pending] == response["sentences"]
+        assert played.text == baseline["draft"]["lines"][0]["text"]
+        assert artifact.model_dump(mode="json") == baseline
+        fresh = SimpleNamespace()
+        load_story(fresh, artifact)
+        assert fresh.state.script_lines[1].text == baseline["draft"]["lines"][1]["text"]
+    finally:
+        runtime.close()

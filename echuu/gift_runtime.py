@@ -383,6 +383,16 @@ class GiftRuntime:
         if any(line.text != old for line, old, _, _ in pending.jobs):
             self._discard(pending, "script_changed")
             return True
+        if not pending.jobs:
+            # No rewrite exists after a rejected/timed-out model result. Preserve
+            # that primary cause; acknowledgement timing cannot become an effect timeout.
+            pending.settled = True
+            pending.evidence.update(
+                status="not_applied", reason=pending.evidence["reason"] or "unchanged"
+            )
+            pending.release()
+            self._timings(pending)
+            return True
         futures = [future for *_, future in pending.tasks]
         if any(
             future.done() and (future.cancelled() or future.exception() is not None)

@@ -212,3 +212,15 @@ Web 补回 full_script.json/dossier.json，并写 artifacts.json 标明缺失资
 
 `.github/workflows/sdk-build.yml` 在 dev/PR/tag 上构建和验证双 Python 安装；发布须手动 workflow_dispatch publish=true，并经过 sdk-release 环境。
 维护者应为该环境配置审核人。发布 GitHub Release 的版本及源码 manifest，拒绝覆盖已有 tag；本地验证不能证明远端工作流已经执行。
+
+### 完整选稿（schema_version=2）
+
+`generate_story` 在原正文校验通过后，生成并严格校验 `draft.opening`（2–3句）和
+`draft.closing`（1–2句），每句10–25字符，固定 O/C 行号和受限情绪；最多三轮修复，
+失败不发布部分版本。正文原264–506字符约束独立保留。完整内容一起计算哈希。
+
+`StorytellingDriver(prepared_story=...)` 播放 v2 时逐字使用保存的开场、正文、收尾，
+不运行实时 rundown 模型或随机结构变换；首句开场音频就绪才返回准备完成。
+音频失败中止，不能跳过或用字幕当作播放完成。宿主仍需实际 playout 后确认每步。
+礼物仅改写本场加载副本中尚未播放的正文，开场、收尾及保存版本不变；下场重新加载原稿。
+v1 旧正文可读取、校验和导出，宿主应提示重新生成完整选稿，不能补造历史开场/收尾。

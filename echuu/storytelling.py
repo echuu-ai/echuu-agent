@@ -43,6 +43,8 @@ class StorytellingDriver:
         self._first_body = None
         self._opening = deque()
         self._closing = None
+        self._saved_opening = deque()
+        self._saved_closing = []
         self._diagnostics = deque(maxlen=64)
         self._index = 0
         self._spoken = []
@@ -96,7 +98,8 @@ class StorytellingDriver:
         self._card = PersonaCard.from_dict(value.persona_card)
         self._brief = (
             produce_topic_brief(e.llm, value.topic)
-            if self.options.grounding and self.prepared_story is None else ""
+            if self.options.grounding and self.prepared_story is None
+            else ""
         )
         background = f"【本次用户设定·故事前提】{value.background}\n本次主题：{value.topic}\n保留用户人设与明确虚构设定；现实产品和新闻若与最新有来源的事实冲突，应更正旧背景，不得默认把真实事件当成虚构。"
         if value.memory:
@@ -110,13 +113,17 @@ class StorytellingDriver:
         future = None
         deadline = monotonic() + self.options.preparation_timeout
         try:
-            if self.options.rundown:
+            if self.options.rundown and self.prepared_story is None:
                 future = opening_pool.submit(
                     self._rundown, "opening", e.tts.fork_preparation()
                 )
             if self.prepared_story is not None:
                 from .prepared_story import load_story
+
                 load_story(e, self.prepared_story)
+                if self.prepared_story.schema_version == 2:
+                    self._saved_opening = deque(self.prepared_story.draft["opening"])
+                    self._saved_closing = self.prepared_story.draft["closing"]
             else:
                 e.setup(
                     name=value.name,
@@ -149,6 +156,10 @@ class StorytellingDriver:
             "total_units": len(e.state.show.units),
             "total_lines": sum(len(unit.lines) for unit in e.state.show.units),
         }
+        if self.prepared_story is not None and self.prepared_story.schema_version == 2:
+            self._original_script["rundown"] = {
+                key: self.prepared_story.draft[key] for key in ("opening", "closing")
+            }
         e.background_interactions = BackgroundInteractions(e)
         self._gift_runtime = GiftRuntime(e)
         # Render lazily: one prepared step at a time, never enqueue an entire show.
@@ -157,16 +168,43 @@ class StorytellingDriver:
             max_steps=value.max_steps, play_audio=False, save_audio=False
         )
         # One original step is ready before READY; do not enqueue a whole show.
-        self._first_body = next(self._generator, None)
+        if self._saved_opening:
+            self._opening.append(
+                self._render_saved(self._saved_opening.popleft(), "opening")
+            )
+        else:
+            self._first_body = next(self._generator, None)
         if e.tts.enabled:
             self._opening = deque(item for item in self._opening if item.get("audio"))
+        if self.prepared_story is not None and self.prepared_story.schema_version == 2:
+            return [
+                line["text"]
+                for key in ("opening", "lines", "closing")
+                for line in self.prepared_story.draft[key]
+            ]
         return [str(item.get("speech", "")) for item in self._opening] + [
             line.text for unit in e.state.show.units for line in unit.lines
         ][:24]
 
+    def _render_saved(self, line, stage):
+        from .prepared_rundown import render_line
+
+        tts = (
+            self.engine.tts.fork_preparation()
+            if self.engine.tts.enabled
+            else self.engine.tts
+        )
+        try:
+            return render_line(line, stage, tts)
+        finally:
+            if tts.enabled:
+                tts.close_preparation()
+
     def next_step(self):
         if self._opening:
             item = self._opening.popleft()
+        elif self._saved_opening:
+            item = self._render_saved(self._saved_opening.popleft(), "opening")
         elif self._first_body is not None:
             item, self._first_body = self._first_body, None
         elif not self._ended:
@@ -175,8 +213,14 @@ class StorytellingDriver:
                 self._ended = True
                 self.engine.background_interactions.close()
                 self._closing = iter(
-                    self._rundown("closing", self.engine.tts.fork_preparation())
-                    if self.options.rundown
+                    (
+                        self._render_saved(line, "closing")
+                        for line in self._saved_closing
+                    )
+                    if self.prepared_story is not None
+                    and self.prepared_story.schema_version == 2
+                    else self._rundown("closing", self.engine.tts.fork_preparation())
+                    if self.options.rundown and self.prepared_story is None
                     else []
                 )
                 item = next(self._closing, None)
