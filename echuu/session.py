@@ -255,7 +255,7 @@ class LiveSession:
             raise InvalidTransition("Driver does not support reliable gifts")
         if (
             self._gift_pending
-            or self._gift_current
+            or (self._gift_current and not self._gifts[self._gift_current][1].done())
             or len(self._gifts) >= self.options.max_interactions
         ):
             raise CapacityExceeded("Gift capacity reached")
@@ -336,7 +336,14 @@ class LiveSession:
                     try:
                         step = await self._call(
                             self._driver.prepare_gift,
-                            batch,
+                            batch.model_copy(
+                                update={
+                                    "start_within": min(
+                                        batch.start_within,
+                                        max(0.001, expires - monotonic()),
+                                    )
+                                }
+                            ),
                             self._autoplay,
                             timeout=max(0.01, expires - monotonic()),
                         )
@@ -393,10 +400,30 @@ class LiveSession:
                 if self._gift_current:
                     assert isinstance(self._driver, GiftDriver)
                     key = self._gift_current
-                    await self._call(self._driver.finish_gift, key, confirmed)
+                    settled = (
+                        await self._call(self._driver.finish_gift, key, confirmed)
+                        if not self._draining
+                        else True
+                    )
                     future = self._gifts[key][1]
                     if not future.done():
                         future.set_result(confirmed)
+                    while (
+                        self.state == "RUNNING"
+                        and not self._draining
+                        and confirmed
+                        and settled is False
+                        and self._gift_pending is None
+                    ):
+                        if monotonic() >= expires:
+                            await self.stop("gift_effect_preparation_timeout")
+                            return
+                        await self._tick()
+                        await asyncio.sleep(0.05)
+                        if self.state == "RUNNING" and not self._draining:
+                            settled = await self._call(
+                                self._driver.finish_gift, key, confirmed
+                            )
                     self._gift_current = None
                 await self._refresh_artifacts()
                 self._pending = None

@@ -4,7 +4,8 @@ import re
 import copy
 import hashlib
 from concurrent.futures import ThreadPoolExecutor
-from time import monotonic
+from time import monotonic, time
+from threading import Lock
 
 from pydantic import BaseModel, Field, ValidationError
 
@@ -24,6 +25,40 @@ class GiftRewrite(BaseModel):
     selected_gift_id: str | None
     acknowledgement: str = Field(min_length=1, max_length=60)
     sentences: list[str] = Field(max_length=3)
+
+
+class PendingGiftAudio:
+    def __init__(self, batch_id, fork, started, deadline, revision, evidence):
+        self.batch_id = batch_id
+        self.fork = fork
+        self.started = started
+        self.deadline = deadline
+        self.revision = revision
+        self.evidence = evidence
+        self.audio_started = monotonic()
+        self.tasks = []
+        self.jobs = []
+        self.replacements = []
+        self.completed = {}
+        self.lock = Lock()
+        self.settled = False
+        self.ack_finished_at = None
+
+    def track(self, kind, line_index, chunk_index, future):
+        self.tasks.append((kind, line_index, chunk_index, future))
+
+        def completed(value):
+            # Provider threads record time only; they never mutate live content.
+            with self.lock:
+                self.completed[id(value)] = monotonic()
+
+        future.add_done_callback(completed)
+        return future
+
+    def release(self):
+        if self.fork is not None:
+            fork, self.fork = self.fork, None
+            fork.close_preparation()
 
 
 def single_sentence(text, limit):
@@ -161,6 +196,9 @@ class GiftRuntime:
     def prepare(self, batch, allow_effect):
         started = monotonic()
         e = self.engine
+        if self.pending is not None:
+            self._discard(self.pending, "replaced")
+            self.pending = None
         upcoming = e._upcoming_script_lines()
         for line, old, replacement in self.applied:
             if (
@@ -201,7 +239,10 @@ class GiftRuntime:
             model_seconds=0,
             preparation_seconds=0,
             budget_seconds=model_budget,
-            audio_seconds=0,
+            ack_first=True,
+            effect_preparation_seconds=None,
+            effect_wait_seconds=None,
+            audio_seconds=None,
             ack_audio_seconds=0,
             audio_chunks=0,
             audio_tasks=[],
@@ -239,86 +280,149 @@ class GiftRuntime:
             raise ValueError("Fallback thanks rejected by content guard")
         from .live.breath import chunk_text
 
-        # Submit the whole bounded batch to one isolated two-worker voice pool.
-        # Playback still waits for complete candidate audio and the original deadline.
-        audio_started = monotonic()
-        deadline = started + batch.start_within
-        fork = e.tts.fork_preparation()
-        replacements = []
-        audio_tasks = []
+        evidence["reason"] = reason
+        pending = PendingGiftAudio(
+            batch.batch_id,
+            e.tts.fork_preparation(),
+            started,
+            started + batch.start_within,
+            e.background_interactions.revision,
+            evidence,
+        )
+        self.pending = pending
         try:
-            acknowledgement = fork.prepare(thanks)
-            audio_tasks.append(("acknowledgement", 0, 0, acknowledgement))
-            jobs = []
+            acknowledgement = pending.track(
+                "acknowledgement", 0, 0, pending.fork.prepare(thanks)
+            )
             if result:
                 for line_index, ((_, _, line), old, new) in enumerate(
                     zip(targets, originals, result.sentences)
                 ):
                     if old != new:
                         chunks = [
-                            (index, chunk, fork.prepare(chunk))
+                            (
+                                index,
+                                chunk,
+                                pending.track(
+                                    "rewrite",
+                                    line_index,
+                                    index,
+                                    pending.fork.prepare(chunk),
+                                ),
+                            )
                             for index, chunk in enumerate(chunk_text(new) or [new])
                         ]
-                        audio_tasks.extend(
-                            ("rewrite", line_index, index, future)
-                            for index, _, future in chunks
-                        )
-                        jobs.append((line, old, new, chunks))
-            evidence["audio_chunks"] = 1 + sum(len(job[3]) for job in jobs)
-            audio = acknowledgement.result(timeout=max(0.001, deadline - monotonic()))
-            evidence["ack_audio_seconds"] = round(monotonic() - audio_started, 3)
+                        pending.jobs.append((line, old, new, chunks))
+            evidence["audio_chunks"] = len(pending.tasks)
+            audio = acknowledgement.result(
+                timeout=max(0.001, pending.deadline - monotonic())
+            )
             if not audio:
                 raise ValueError("Gift acknowledgement audio unavailable")
-            try:
-                for line, old, new, chunks in jobs:
-                    prepared = {}
-                    for index, chunk, future in chunks:
-                        value = future.result(
-                            timeout=max(0.001, deadline - monotonic())
-                        )
-                        if not value:
-                            raise ValueError("Gift rewrite audio unavailable")
-                        prepared[(line.id, index, chunk)] = value
-                    replacements.append((line, old, new, prepared))
-            except Exception as exc:  # noqa: BLE001 — optional effect audio failure keeps original
-                replacements = []
-                logger.info("Gift effect retained original: %s", type(exc).__name__)
-                reason = "audio_failed"
         except Exception:
-            evidence.update(status="not_applied", reason="audio_failed")
+            self._discard(pending, "audio_failed")
+            self.pending = None
             raise
-        finally:
-            fork.close_preparation()
-            evidence["audio_seconds"] = round(monotonic() - audio_started, 3)
-            evidence["preparation_seconds"] = round(monotonic() - started, 3)
-            evidence["audio_tasks"] = [
-                {
-                    "kind": kind,
-                    "line_index": line_index,
-                    "chunk_index": chunk_index,
-                    **{
-                        key: timing[key]
-                        for key in (
-                            "queue_seconds",
-                            "synthesis_seconds",
-                            "attempts",
-                            "status",
-                        )
-                        if key in timing
-                    },
-                }
-                for kind, line_index, chunk_index, future in audio_tasks
-                if isinstance(
-                    timing := getattr(future, "preparation_timing", None), dict
-                )
-            ]
-        if reason is None and not replacements:
-            reason = "unchanged"
         evidence.update(
-            status="prepared" if replacements else "not_applied",
-            reason=reason,
-            changed_lines=len(replacements),
+            ack_audio_seconds=round(monotonic() - pending.audio_started, 3),
             preparation_seconds=round(monotonic() - started, 3),
+        )
+        logger.info(
+            "Gift thanks ready batch_id=%s ready_unix=%.6f", batch.batch_id, time()
+        )
+        self.poll()
+        return thanks, audio
+
+    def _timings(self, pending, end=None):
+        evidence = pending.evidence
+        evidence["audio_seconds"] = round(
+            (end or monotonic()) - pending.audio_started, 3
+        )
+        evidence["audio_tasks"] = [
+            {
+                "kind": kind,
+                "line_index": line_index,
+                "chunk_index": chunk_index,
+                **{
+                    key: timing[key]
+                    for key in (
+                        "queue_seconds",
+                        "synthesis_seconds",
+                        "attempts",
+                        "status",
+                    )
+                    if key in timing
+                },
+            }
+            for kind, line_index, chunk_index, future in pending.tasks
+            if isinstance(timing := getattr(future, "preparation_timing", None), dict)
+        ]
+        if pending.ack_finished_at is not None:
+            evidence["effect_wait_seconds"] = round(
+                monotonic() - pending.ack_finished_at, 3
+            )
+
+    def _discard(self, pending, reason):
+        pending.replacements = []
+        pending.settled = True
+        pending.evidence.update(
+            status="not_applied", reason=reason, changed_lines=0, lines=[]
+        )
+        pending.release()
+        self._timings(pending)
+
+    def poll(self):
+        """Collect ready candidates on the serialized engine thread without waiting."""
+        pending = self.pending
+        if pending is None or pending.settled:
+            return True
+        e = self.engine
+        if e.background_interactions.revision != pending.revision:
+            self._discard(pending, "revision_changed")
+            return True
+        if any(line.text != old for line, old, _, _ in pending.jobs):
+            self._discard(pending, "script_changed")
+            return True
+        futures = [future for *_, future in pending.tasks]
+        if any(
+            future.done() and (future.cancelled() or future.exception() is not None)
+            for future in futures
+        ):
+            self._discard(pending, "audio_failed")
+            return True
+        with pending.lock:
+            completed = dict(pending.completed)
+        ready = all(id(future) in completed for future in futures)
+        if not ready:
+            if monotonic() >= pending.deadline:
+                self._discard(pending, "audio_timeout")
+                return True
+            self._timings(pending)
+            return False
+        end = max(completed.values(), default=monotonic())
+        if end > pending.deadline:
+            self._discard(pending, "audio_timeout")
+            return True
+        replacements = []
+        for line, old, new, chunks in pending.jobs:
+            audio = {}
+            for index, chunk, future in chunks:
+                value = future.result(timeout=0.001)
+                if not value:
+                    self._discard(pending, "audio_failed")
+                    return True
+                audio[(line.id, index, chunk)] = value
+            replacements.append((line, old, new, audio))
+        pending.replacements = replacements
+        pending.settled = True
+        pending.evidence.update(
+            status="prepared" if replacements else "not_applied",
+            reason=pending.evidence["reason"]
+            or (None if replacements else "unchanged"),
+            changed_lines=len(replacements),
+            effect_preparation_seconds=round(end - pending.started, 3)
+            if replacements
+            else None,
             lines=[
                 {
                     "line_sha256": self.digest(line.id),
@@ -329,29 +433,42 @@ class GiftRuntime:
                 for line, old, new, _ in replacements
             ],
         )
-        self.pending = (
-            batch.batch_id,
-            e.background_interactions.revision,
-            replacements,
-        )
-        return thanks, audio
+        pending.release()
+        self._timings(pending, end)
+        if replacements:
+            logger.info(
+                "Gift rewrite ready batch_id=%s ready_unix=%.6f",
+                pending.batch_id,
+                time() - (monotonic() - end),
+            )
+        return True
 
     def finish(self, batch_id, played):
-        if not self.pending or self.pending[0] != batch_id:
-            return
-        _, revision, replacements = self.pending
-        self.pending = None
+        pending = self.pending
+        if pending is None or pending.batch_id != batch_id:
+            return True
         e = self.engine
         self.record(batch_id, acknowledgement_played=played)
         if not played:
-            self.record(batch_id, status="not_applied", reason="ack_not_played")
-            return
-        if e.background_interactions.revision != revision:
+            self._discard(pending, "ack_not_played")
+            self.pending = None
+            return True
+        if pending.ack_finished_at is None:
+            pending.ack_finished_at = monotonic()
+        if not self.poll():
+            return False
+        self.pending = None
+        self.record(
+            batch_id,
+            effect_wait_seconds=round(monotonic() - pending.ack_finished_at, 3),
+        )
+        replacements = pending.replacements
+        if e.background_interactions.revision != pending.revision:
             self.record(batch_id, status="not_applied", reason="revision_changed")
-            return
+            return True
         if any(line.text != old for line, old, _, _ in replacements):
             self.record(batch_id, status="not_applied", reason="script_changed")
-            return
+            return True
         for line, old, new, audio in replacements:
             line.text = new
             e._interaction_audio.update(audio)
@@ -360,6 +477,7 @@ class GiftRuntime:
         if replacements:
             e.background_interactions.revision += 1
             self.record(batch_id, status="applied", reason=None)
+        return True
 
     @staticmethod
     def digest(text):
@@ -392,6 +510,8 @@ class GiftRuntime:
         )
 
     def played(self, step):
+        if step.payload.get("purpose") == "gift_ack":
+            self.record(step.payload.get("batch_id"), acknowledgement_played=True)
         effect = step.payload.get("gift_effect")
         if not effect:
             return
@@ -411,6 +531,9 @@ class GiftRuntime:
                 item.update(status="played", reason=None)
 
     def close(self):
+        if self.pending is not None:
+            self._discard(self.pending, "cancelled")
+            self.pending = None
         for item in self.evidence:
             if item["status"] in {"preparing", "prepared", "applied"}:
                 item.update(status="not_applied", reason="cancelled")

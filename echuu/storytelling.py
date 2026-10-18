@@ -248,7 +248,7 @@ class StorytellingDriver:
         )
 
     def finish_gift(self, batch_id, played):
-        self._gift_runtime.finish(batch_id, played)
+        return self._gift_runtime.finish(batch_id, played)
 
     def submit(self, interaction: Interaction):
         from .live.state import Danmaku
@@ -285,6 +285,8 @@ class StorytellingDriver:
         self.engine.emit_steering(dm, "queued")
 
     def tick(self):
+        if self._gift_runtime:
+            self._gift_runtime.poll()
         if not self._ended:
             self.engine.background_interactions.tick()
         diagnostics = list(self._diagnostics)

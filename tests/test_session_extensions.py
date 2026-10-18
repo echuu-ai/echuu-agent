@@ -45,6 +45,83 @@ def batch(key="gift"):
 
 
 @pytest.mark.asyncio
+async def test_played_thanks_receipt_resolves_while_effect_wait_is_cancellable():
+    class WaitingDriver(ExtendedDriver):
+        def finish_gift(self, batch_id, played):
+            self.result = (batch_id, played)
+            return False
+
+    driver = WaitingDriver()
+    session = LiveSession(inputs(), driver=driver)
+    await session.prepare()
+    await session.start(autoplay=False)
+    done = session.submit_gift_batch(batch())
+    async for event in session.events():
+        if event.type == "step":
+            await session.report_playback(event.step.step_id, "COMMITTED")
+            await session.report_playback(event.step.step_id, "PLAYED")
+            assert await asyncio.wait_for(done, 1)
+            assert driver.generated == 0
+            queued = session.submit_gift_batch(batch("next"))
+            assert not queued.done()
+            with pytest.raises(CapacityExceeded):
+                session.submit_gift_batch(batch("overflow"))
+            await asyncio.wait_for(session.stop(), 0.5)
+            assert queued.result() is False
+    assert await asyncio.to_thread(driver.closed.wait, 1)
+    assert driver.generated == 0
+
+
+@pytest.mark.asyncio
+async def test_gift_preparation_receives_original_deadline_after_queue_wait(
+    monkeypatch,
+):
+    import echuu.session as session_module
+
+    clock = [10.0]
+    monkeypatch.setattr(session_module, "monotonic", lambda: clock[0])
+
+    class TimedDriver(ExtendedDriver):
+        def prepare_gift(self, value, allow_effect):
+            self.remaining_budget = value.start_within
+            return super().prepare_gift(value, allow_effect)
+
+    driver = TimedDriver()
+    session = LiveSession(inputs(), driver=driver)
+    await session.prepare()
+    await session.start()
+    async for event in session.events():
+        if event.type == "step":
+            if event.step.payload.get("purpose") != "gift_ack":
+                session.submit_gift_batch(batch())
+                clock[0] += 3
+                await session.report_playback(event.step.step_id, "COMMITTED")
+                await session.report_playback(event.step.step_id, "PLAYED")
+            else:
+                assert driver.remaining_budget == 7
+                await session.stop()
+
+
+@pytest.mark.asyncio
+async def test_custom_driver_cannot_wait_forever_after_played_thanks():
+    class WaitingDriver(ExtendedDriver):
+        def finish_gift(self, batch_id, played):
+            return False
+
+    session = LiveSession(inputs(), driver=WaitingDriver())
+    await session.prepare()
+    await session.start(autoplay=False)
+    done = session.submit_gift_batch(batch().model_copy(update={"start_within": 0.2}))
+    async for event in session.events():
+        if event.type == "step":
+            await session.report_playback(event.step.step_id, "COMMITTED")
+            await session.report_playback(event.step.step_id, "PLAYED")
+            assert await asyncio.wait_for(done, 1)
+            await asyncio.wait_for(session.wait_closed(), 1)
+    assert session.reason == "gift_effect_preparation_timeout"
+
+
+@pytest.mark.asyncio
 async def test_preview_gift_is_confirmed_only_after_playback():
     driver = ExtendedDriver()
     session = LiveSession(inputs(), driver=driver)

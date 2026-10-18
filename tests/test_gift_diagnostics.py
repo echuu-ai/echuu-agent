@@ -182,7 +182,7 @@ def test_gift_submits_all_audio_before_waiting_and_skips_unchanged_lines():
     closed = []
     response["sentences"][1] = lines[1].text
 
-    class AudioFuture:
+    class AudioFuture(Future):
         def result(self, *, timeout):
             assert submitted == [response["acknowledgement"], response["sentences"][0]]
             assert 0 < timeout <= 30
@@ -191,7 +191,9 @@ def test_gift_submits_all_audio_before_waiting_and_skips_unchanged_lines():
     class Fork:
         def prepare(self, text):
             submitted.append(text)
-            return AudioFuture()
+            future = AudioFuture()
+            future.set_result(b"audio")
+            return future
 
         def close_preparation(self):
             closed.append(True)
