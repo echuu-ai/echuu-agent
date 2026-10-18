@@ -156,3 +156,18 @@ def test_configured_model_budget_reserves_half_remaining_time_for_audio():
         assert runtime.snapshot()[0]["reason"] == "ack_not_played"
     finally:
         runtime.close()
+
+
+def test_invalid_schema_reports_field_and_type_without_raw_input():
+    runtime, _engine, _lines, response = rig()
+    response["sentences"] = "PRIVATE BODY"
+    try:
+        runtime.prepare(batch(), True)
+        item = runtime.snapshot()[0]
+        assert item["reason"] == "schema_invalid"
+        assert item["validation_issues"] == [
+            {"field": "sentences", "code": "list_type"}
+        ]
+        assert "PRIVATE" not in json.dumps(item)
+    finally:
+        runtime.close()

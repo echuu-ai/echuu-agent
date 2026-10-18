@@ -187,7 +187,8 @@ N 是 `git rev-list --count <base>..HEAD`，不手动维护；相同源码和标
 `start(autoplay=False)` 只消费礼物，正文不推进；宿主确认业务 LIVE 后 `set_autoplay(True)`。
 礼物步骤携带 purpose=gift_ack、batch_id、event_ids。宿主必须先向自己的交付系统确认 start，核对期限，再 COMMITTED/播放/PLAYED。
 感谢失败/过期回报 CANCELLED，效果不生效；只有感谢 PLAYED 后才提交仍匹配原稿和 revision 的候选效果。
-生成/改写预算 2 秒，异常保持原稿和固定感谢；候选音频准备失败同样保持原稿。效果最多一种且最多三行，不跨会话继承。
+生成/改写默认预算 2 秒；宿主可通过 `EngineConfig.gift_model_timeout_seconds` 设置最多 8 秒，实际预算还受本批剩余时间一半限制，为语音预留时间；不会延长批次启动期限。异常保持原稿和固定感谢；候选音频准备失败同样保持原稿。效果最多一种且最多三行，不跨会话继承。
+`StorytellingDriver.gift_diagnostics` 提供最近 20 批的脱敏效果证据，区分 prepared/applied/played 与失败原因；仅真实 PLAYED 回调覆盖一行全部音频分段后计为已播，感谢成功不等于效果成功。证据含原稿/改写哈希、计数、耗时与字段校验代码，不含原文或供应商响应。
 已在运行的同步模型调用无法强杀，超时后的结果不得发布；新礼物不排队堆积同一模型工作线程。
 `finish()` 拒绝新输入并有界等待当前 COMMITTED 步骤；`stop()` 强制封闭并取消未完成步骤。
 宿主没有可靠回执时必须 estimated=True，不能将估算当作可靠礼物成功。
