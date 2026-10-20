@@ -1,18 +1,21 @@
 """
 TTS 客户端封装（基于 Qwen TTS Realtime API）。
-直接使用 workflow/backend/tts_client.py 的 CosyVoiceTTS 实现。
+使用随包发布的 Qwen TTS 实现。
 支持自动转换为 MP3 格式。
 """
 
 from __future__ import annotations
 
-import importlib.util
-import os
 import copy
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from time import monotonic
 from typing import Optional
+
+from echuu.diagnostics import diagnostic
+
+from ..config import TTSConfig
 
 
 def convert_wav_to_mp3(wav_path: str, mp3_path: str = None, bitrate: str = "128k") -> Optional[str]:
@@ -30,12 +33,12 @@ def convert_wav_to_mp3(wav_path: str, mp3_path: str = None, bitrate: str = "128k
     try:
         from pydub import AudioSegment
     except ImportError:
-        print("⚠️ pydub 未安装，无法转换为 MP3")
+        diagnostic("⚠️ pydub 未安装，无法转换为 MP3")
         return None
 
     wav_file = Path(wav_path)
     if not wav_file.exists():
-        print(f"⚠️ WAV 文件不存在: {wav_path}")
+        diagnostic(f"⚠️ WAV 文件不存在: {wav_path}")
         return None
 
     if mp3_path is None:
@@ -44,7 +47,7 @@ def convert_wav_to_mp3(wav_path: str, mp3_path: str = None, bitrate: str = "128k
         mp3_path = Path(mp3_path)
 
     try:
-        print(f"  🔄 正在转换为 MP3...")
+        diagnostic(f"  🔄 正在转换为 MP3...")
         audio = AudioSegment.from_wav(str(wav_file))
         audio.export(str(mp3_path), format="mp3", bitrate=bitrate)
 
@@ -53,20 +56,23 @@ def convert_wav_to_mp3(wav_path: str, mp3_path: str = None, bitrate: str = "128k
         mp3_size = mp3_path.stat().st_size / (1024 * 1024)
         compression_ratio = (1 - mp3_size / wav_size) * 100
 
-        print(f"  ✅ MP3 已保存: {mp3_path}")
-        print(f"  📊 文件大小: {mp3_size:.1f}MB (WAV: {wav_size:.1f}MB, 压缩率: {compression_ratio:.0f}%)")
+        diagnostic(f"  ✅ MP3 已保存: {mp3_path}")
+        diagnostic(f"  📊 文件大小: {mp3_size:.1f}MB (WAV: {wav_size:.1f}MB, 压缩率: {compression_ratio:.0f}%)")
 
         return str(mp3_path)
 
     except Exception as exc:
-        print(f"  ⚠️ MP3 转换失败: {exc}")
+        diagnostic(f"  ⚠️ MP3 转换失败: {exc}")
         return None
+
 
 
 class TTSClient:
     """轻量 TTS 包装器，提供统一接口。"""
 
-    def __init__(self):
+    def __init__(self, *, config: TTSConfig | None = None):
+        explicit = config is not None
+        self.config = config if explicit else TTSConfig.from_env()
         self.enabled = False
         self._recording = False
         self._recording_buffer = []
@@ -75,9 +81,9 @@ class TTSClient:
         self._prepare_lock = threading.Lock()
         self._prepare_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="speech-prepare")
 
-        api_key = os.getenv("DASHSCOPE_API_KEY")
+        api_key = self.config.api_key.get_secret_value() if self.config.api_key else None
         if not api_key:
-            print("未设置 DASHSCOPE_API_KEY，TTS 已禁用")
+            diagnostic("未设置 DASHSCOPE_API_KEY，TTS 已禁用")
             return
 
         try:
@@ -86,61 +92,30 @@ class TTSClient:
                 raise ImportError("无法加载 CosyVoiceTTS")
 
             # Use qwen3-tts-flash-realtime model for multilingual support
-            model = os.getenv("TTS_MODEL", "qwen3-tts-flash-realtime")
-            voice = os.getenv("TTS_VOICE", "Cherry")
+            model = self.config.model
+            voice = self.config.voice
 
             self.tts = cosyvoice_cls(
                 api_key=api_key,
                 model=model,
                 voice=voice,
+                config=self.config,
             )
             self.enabled = True
-            print(f"✅ TTS 已启用: model={model}, voice={voice}")
+            diagnostic(f"✅ TTS 已启用: model={model}, voice={voice}")
         except Exception as exc:
-            print(f"TTS 初始化失败: {exc}")
-            import traceback
-            traceback.print_exc()
+            self.close_preparation()
+            if explicit:
+                raise
+            diagnostic(f"TTS 初始化失败: {exc}")
+            diagnostic("TTS disabled after initialization failure")
 
     @staticmethod
-    def _find_project_root() -> Path:
-        """寻找项目根目录（包含 workflow 目录）。"""
-        current = Path(__file__).resolve()
-        # Go up directories to find the root
-        for parent in [current] + list(current.parents):
-            # Check for workflow directory (indicating echuu-agent root)
-            if (parent / "workflow").exists() and (parent / "workflow" / "backend").exists():
-                return parent
-            # Also check for .git or requirements.txt as fallback
-            if (parent / ".git").exists() or (parent / "requirements.txt").exists():
-                return parent
-        # Fallback to current working directory
-        return Path.cwd()
+    def _load_cosyvoice_class():
+        """返回包内实现，保留旧加载方法名称供现有调用者使用。"""
+        from .qwen_tts import CosyVoiceTTS
 
-    def _load_cosyvoice_class(self):
-        """
-        动态加载 workflow/backend/tts_client.py 中的 CosyVoiceTTS。
-        """
-        project_root = self._find_project_root()
-        module_path = project_root / "workflow" / "backend" / "tts_client.py"
-
-        if not module_path.exists():
-            # Try going up one more level (in case we're in echuu-sdk-release)
-            alt_root = project_root.parent
-            module_path = alt_root / "workflow" / "backend" / "tts_client.py"
-
-        if not module_path.exists():
-            print(f"⚠️ 找不到 TTS 模块: {module_path}")
-            print(f"   当前工作目录: {Path.cwd()}")
-            print(f"   项目根目录: {project_root}")
-            return None
-
-        spec = importlib.util.spec_from_file_location("workflow_backend_tts_client", module_path)
-        if not spec or not spec.loader:
-            print(f"⚠️ 无法加载 TTS 模块规范")
-            return None
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return getattr(module, "CosyVoiceTTS", None)
+        return CosyVoiceTTS
 
     def update_session(self, *, pitch_rate: float = 1.0, speech_rate: float = 1.0, volume: int = 50) -> None:
         """Pass segment-level acoustic settings to the underlying CosyVoiceTTS.
@@ -150,7 +125,7 @@ class TTSClient:
         if not self.enabled or not self.tts:
             return
         # 直播听感限速：引擎的 HYPER_FLUENT 会推 1.1x，叠加长句会盖掉呼吸停顿
-        rate_cap = float(os.getenv("TTS_SPEECH_RATE_CAP", "1.0"))
+        rate_cap = getattr(getattr(self, "config", None), "speech_rate_cap", 1.0)
         pitch_rate  = max(0.7, min(1.3, pitch_rate))
         speech_rate = max(0.7, min(1.3, min(speech_rate, rate_cap)))
         volume      = max(0,   min(100, volume))
@@ -159,7 +134,7 @@ class TTSClient:
             self.tts.speech_rate = speech_rate
             self.tts.volume = volume
         except Exception as exc:
-            print(f"[TTS] update_session failed: {exc}")
+            diagnostic(f"[TTS] update_session failed: {exc}")
 
     def set_instruction(self, instruction: str) -> None:
         """设置下一次合成的自然语言情绪指令（仅 instruct 系列模型生效）。"""
@@ -168,7 +143,7 @@ class TTSClient:
         try:
             self.tts.instruction = instruction or ""
         except Exception as exc:
-            print(f"[TTS] set_instruction failed: {exc}")
+            diagnostic(f"[TTS] set_instruction failed: {exc}")
 
     def fork_preparation(self):
         """Independent voice settings and worker pool; never touch the live recorder."""
@@ -192,23 +167,38 @@ class TTSClient:
         with self._prepare_lock:
             future = self._prepared.get(key)
             if future is None:
-                future = self._prepare_pool.submit(self._generate_prepared, voice, text)
+                timing = {"queued_at": monotonic(), "attempts": 0, "status": "queued"}
+                future = self._prepare_pool.submit(self._generate_prepared, voice, text, timing)
+                future.preparation_timing = timing
                 self._prepared[key] = future
         return future
 
     @staticmethod
-    def _generate_prepared(voice, text):
+    def _generate_prepared(voice, text, timing=None):
         from .breath import synthesize_with_breath
-        for attempt in range(2):
-            try:
-                audio = synthesize_with_breath(voice.synthesize, text, sample_rate=voice.sample_rate)
-                if audio:
-                    return audio
-                raise RuntimeError("TTS returned no audio")
-            except Exception:
-                if attempt:
-                    raise
-        raise RuntimeError("TTS failed")
+        started = monotonic()
+        if timing is not None:
+            timing.update(queue_seconds=round(started - timing["queued_at"], 3), status="running")
+        try:
+            for attempt in range(2):
+                if timing is not None:
+                    timing["attempts"] = attempt + 1
+                try:
+                    audio = synthesize_with_breath(voice.synthesize, text, sample_rate=voice.sample_rate, strict=True)
+                    if audio:
+                        if timing is not None:
+                            timing["status"] = "ready"
+                        return audio
+                    raise RuntimeError("TTS returned no audio")
+                except Exception:
+                    if attempt:
+                        raise
+            raise RuntimeError("TTS failed")
+        finally:
+            if timing is not None:
+                timing["synthesis_seconds"] = round(monotonic() - started, 3)
+                if timing["status"] != "ready":
+                    timing["status"] = "failed"
 
     def close_preparation(self):
         self._prepare_pool.shutdown(wait=False, cancel_futures=True)
@@ -229,11 +219,11 @@ class TTSClient:
 
         from .breath import synthesize_with_breath
 
-        sample_rate = int(os.getenv("TTS_SAMPLE_RATE", "24000"))
+        sample_rate = getattr(self.tts, "sample_rate", 24000)
         try:
             audio = self.prepare(text).result()
         except Exception as exc:
-            print(f"[TTS] 合成错误: {exc}")
+            diagnostic(f"[TTS] 合成错误: {exc}")
             return None
 
         if self._recording and audio:
@@ -258,7 +248,7 @@ class TTSClient:
             gap_ms: 段与段之间插入的静音（毫秒），让合并后的音频有喘气停顿（默认 0）
         """
         if not self._recording_buffer:
-            print("没有可保存的录制音频")
+            diagnostic("没有可保存的录制音频")
             return
 
         output_path = Path(path)
@@ -268,7 +258,7 @@ class TTSClient:
             from pydub import AudioSegment
 
             # 使用 pydub 合并所有音频片段
-            print(f"  正在合并 {len(self._recording_buffer)} 个音频片段...")
+            diagnostic(f"  正在合并 {len(self._recording_buffer)} 个音频片段...")
 
             combined = AudioSegment.empty()
             gap = AudioSegment.silent(duration=gap_ms) if gap_ms > 0 else None
@@ -280,7 +270,7 @@ class TTSClient:
                     combined += gap  # 段间插静音，制造喘气停顿
                 combined += audio
                 if (i + 1) % 5 == 0:
-                    print(f"    已合并 {i+1}/{len(self._recording_buffer)}...")
+                    diagnostic(f"    已合并 {i+1}/{len(self._recording_buffer)}...")
 
             # 导出为 MP3
             if convert_to_mp3:
@@ -288,7 +278,7 @@ class TTSClient:
                 if not mp3_path.endswith('.mp3'):
                     mp3_path += '.mp3'
 
-                print(f"  🔄 正在导出 MP3...")
+                diagnostic(f"  🔄 正在导出 MP3...")
                 combined.export(mp3_path, format="mp3", bitrate="128k")
 
                 # 显示文件大小
@@ -296,32 +286,31 @@ class TTSClient:
                 total_wav_size = sum(len(chunk) for chunk in self._recording_buffer) / (1024 * 1024)
                 compression_ratio = (1 - mp3_size / total_wav_size) * 100 if total_wav_size > 0 else 0
 
-                print(f"  ✅ MP3 已保存: {Path(mp3_path).name}")
-                print(f"  📊 文件大小: {mp3_size:.1f}MB (原始: {total_wav_size:.1f}MB, 压缩率: {compression_ratio:.0f}%)")
+                diagnostic(f"  ✅ MP3 已保存: {Path(mp3_path).name}")
+                diagnostic(f"  📊 文件大小: {mp3_size:.1f}MB (原始: {total_wav_size:.1f}MB, 压缩率: {compression_ratio:.0f}%)")
             else:
                 # 导出为 WAV
-                print(f"  🔄 正在导出 WAV...")
+                diagnostic(f"  🔄 正在导出 WAV...")
                 combined.export(str(output_path), format="wav")
                 wav_size = output_path.stat().st_size / (1024 * 1024)
-                print(f"  ✅ WAV 已保存: {output_path.name} ({wav_size:.1f} MB)")
+                diagnostic(f"  ✅ WAV 已保存: {output_path.name} ({wav_size:.1f} MB)")
 
         except ImportError:
             # 如果 pydub 不可用，使用简单拼接（仅适用于 PCM）
-            print("  ⚠️ pydub 不可用，使用简单拼接...")
+            diagnostic("  ⚠️ pydub 不可用，使用简单拼接...")
             with output_path.open("wb") as f:
                 for chunk in self._recording_buffer:
                     f.write(chunk)
             wav_size = sum(len(chunk) for chunk in self._recording_buffer)
-            print(f"  ✅ 音频已保存: {output_path.name} ({wav_size / (1024*1024):.1f} MB)")
+            diagnostic(f"  ✅ 音频已保存: {output_path.name} ({wav_size / (1024*1024):.1f} MB)")
 
             # 如果需要转换但 pydub 不可用
             if convert_to_mp3:
                 convert_wav_to_mp3(str(output_path))
 
         except Exception as exc:
-            print(f"[TTS] 保存录制失败: {exc}")
-            import traceback
-            traceback.print_exc()
+            diagnostic(f"[TTS] 保存录制失败: {exc}")
+            diagnostic("TTS disabled after initialization failure")
 
         finally:
             self._recording = False

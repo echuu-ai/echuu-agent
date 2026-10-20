@@ -197,3 +197,7 @@ node_modules/
 # Generated diary covers (keep the folder)
 echuu-web/backend/data/diary-covers/*
 !echuu-web/backend/data/diary-covers/.gitkeep
+
+# Generated only inside SDK build staging.
+echuu/_version.py
+echuu/_build.json

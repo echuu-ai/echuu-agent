@@ -14,3 +14,7 @@ DRAFT_SCHEMA = obj({
     'lines': array(obj(strings('id', 'text'))),
     'quotables': array(obj(strings('line_id', 'quote', 'why_shareable'))),
 })
+DRAFT_SCHEMA['properties']['lines'].update(minItems=5, maxItems=10)
+DRAFT_SCHEMA['properties']['lines']['items']['properties']['id']['pattern'] = r'^L\d{3}$'
+DRAFT_SCHEMA['properties']['lines']['items']['properties']['text']['minLength'] = 1
+DRAFT_SCHEMA['properties']['quotables'].update(minItems=1, maxItems=2)

@@ -24,6 +24,7 @@ from echuu.core.prompt_leakage import find_prompt_leaks
 from echuu.core.story_core import StoryCore
 from echuu.core.tuning_guidance import render_generation_constraints
 from echuu.core.unit import ScriptLine, Unit
+from echuu.diagnostics import diagnostic
 
 
 class _LLM(Protocol):
@@ -489,7 +490,7 @@ class ScriptWriter:
         try:
             return self.llm.generate(prompt)
         except Exception as exc:
-            print(f"[ScriptWriter] LLM 调用失败: {exc}")
+            diagnostic(f"[ScriptWriter] LLM 调用失败: {exc}")
             return None
 
     @staticmethod

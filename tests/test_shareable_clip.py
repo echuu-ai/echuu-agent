@@ -31,7 +31,7 @@ def test_semantic_review_is_skipped_but_draft_constraints_remain(invalid_first, 
     for l in d['lines']:l['text']='昨天我问他为什么站在门口，他说只是顺路。我就指着他手里那把伞问，天气这么好，怎么还带了两把伞。他看了看窗外，我才知道他一直在等人。'
     d['quotables']=[{'line_id':'L001','quote':'怎么还带了两把伞'}]
     class Fake:
-        def __init__(self):self.values=iter([plan, draft() if invalid_first else d] + ([draft() if invalid_repair else d] if invalid_first else []));self.calls=0
+        def __init__(self):self.values=iter([plan, draft() if invalid_first else d] + ([draft() if invalid_repair else d] if invalid_first else []) + ([draft()] if invalid_repair else []));self.calls=0
         def call(self,*args,**kwargs):self.calls+=1;return json.dumps(next(self.values),ensure_ascii=False)
     llm=Fake();g=ScriptGeneratorV4(llm)
     if invalid_repair:
@@ -42,7 +42,7 @@ def test_semantic_review_is_skipped_but_draft_constraints_remain(invalid_first, 
         assert len(result)==5
         assert g.last_trace['status']=='completed'
         assert g.last_trace['semantic_status']=='skipped'
-    assert llm.calls==(3 if invalid_first else 2)
+    assert llm.calls==(4 if invalid_repair else 3 if invalid_first else 2)
     assert not any(c['review_mode'] for c in g.last_trace['call_details'])
 
 def test_contrast_with_dash_does_not_escape_guard():

@@ -9,15 +9,17 @@ import json
 import re
 from typing import Dict, Optional
 
+from echuu.diagnostics import diagnostic
+
+from .language import (
+    Language,
+    StreamLanguageContext,
+    detect_danmaku_language,
+    detect_language,
+)
 from .llm_client import LLMClient
 from .state import Danmaku, PerformerMemory, UserProfile
 from .untrusted import render_untrusted, sanitize_untrusted
-from .language import (
-    detect_language,
-    detect_danmaku_language,
-    Language,
-    StreamLanguageContext,
-)
 
 
 class DanmakuResponseGenerator:
@@ -171,8 +173,8 @@ class DanmakuResponseGenerator:
             return result
 
         except json.JSONDecodeError as exc:
-            print(f"[DanmakuResponse] JSON解析失败: {exc}")
-            print(f"[DanmakuResponse] 原始响应: {response_text[:200]}")
+            diagnostic(f"[DanmakuResponse] JSON解析失败: {exc}")
+            diagnostic(f"[DanmakuResponse] 原始响应: {response_text[:200]}")
             # 尝试提取response字段
             extracted = self._try_extract_response(response_text)
             if extracted:
@@ -188,7 +190,7 @@ class DanmakuResponseGenerator:
                 "next_content": "",
             }
         except Exception as exc:
-            print(f"[DanmakuResponse] LLM调用失败: {exc}")
+            diagnostic(f"[DanmakuResponse] LLM调用失败: {exc}")
             return {
                 "response": self._generate_fallback_response(user_profile, danmaku),
                 "action": "continue",

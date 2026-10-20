@@ -11,6 +11,8 @@ import re
 import struct
 from typing import Callable, List, Optional
 
+from echuu.diagnostics import diagnostic
+
 SAMPLE_RATE = 24000
 _WAV_HEADER_LEN = 44
 
@@ -131,10 +133,11 @@ def synthesize_with_breath(
     *,
     sample_rate: int = SAMPLE_RATE,
     rng_jitter: int = _PAUSE_JITTER_MS,
+    strict: bool = False,
 ) -> Optional[bytes]:
     """剥离舞台指示 → 切呼吸组 → 逐组合成 → 静音拼接。
 
-    单组文本直接透传合成；某组失败跳过（降级），全部失败返回 None。
+    单组文本直接透传合成；strict 模式任何分组失败即拒绝整句，否则保持旧降级行为。
     """
     clean = strip_stage_directions(text)
     if not clean:
@@ -148,8 +151,12 @@ def synthesize_with_breath(
         try:
             wav = synth(group)
         except Exception as exc:  # noqa: BLE001 — 单组失败不拖垮整句
-            print(f"[breath] 分段合成失败（跳过）: {exc}")
+            if strict:
+                raise
+            diagnostic(f"[breath] 分段合成失败（跳过）: {exc}")
             wav = None
+        if strict and not wav:
+            raise RuntimeError("TTS breath group returned no audio")
         if wav:
             synthesized.append((group, wav))
     if not synthesized:

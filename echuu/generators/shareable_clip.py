@@ -29,6 +29,7 @@ SYSTEM = """你是直播杂谈编剧。交付一个观众愿意转给朋友的�
 def validate_draft(obj, budget, config):
     lines=obj.get('lines',[])
     if not isinstance(lines,list) or not 5<=len(lines)<=10:raise ValueError('clip needs 5..10 beats')
+    if any(not isinstance(line,dict) for line in lines):raise ValueError('invalid clip line')
     if [l.get('id') for l in lines]!=[f'L{i+1:03d}' for i in range(len(lines))]:raise ValueError('invalid clip IDs')
     if any(not isinstance(l.get('text'),str) or not l['text'].strip() for l in lines):raise ValueError('invalid text')
     chars=sum(len(l['text']) for l in lines)
@@ -53,6 +54,98 @@ def validate_review(review, obj):
     return issues
 
 
+def repair_constraints(obj, budget):
+    """Describe the unchanged acceptance limits and the concrete size deficit."""
+    lines = obj.get('lines', []) if isinstance(obj, dict) else []
+    if not isinstance(lines, list):
+        lines = []
+    chars = sum(
+        len(line['text']) for line in lines
+        if isinstance(line, dict) and isinstance(line.get('text'), str)
+    )
+    return {
+        'min_beats': 5, 'max_beats': 10, 'preferred_beats': 7,
+        'ids': 'L001, L002, ... in order, one ID per beat',
+        'min_chars': budget['min_chars'], 'max_chars': budget['max_chars'],
+        'current_chars': chars, 'missing_chars': max(0, budget['min_chars'] - chars),
+        'excess_chars': max(0, chars - budget['max_chars']),
+        'quotables': '1..2 exact substrings from the referenced spoken line',
+    }
+
+
+class ClipValidationError(ValueError):
+    """Expose bounded validation facts to hosts without leaking model output."""
+
+    def __init__(self, problems, budget, chars):
+        self.details = {'issues': problems, 'chars': chars, 'min_chars': budget['min_chars'], 'max_chars': budget['max_chars']}
+        super().__init__('clip constraints unresolved: ' + json.dumps(problems, ensure_ascii=False))
+
+
+def expand_short_draft(call, draft, data, plan, budget):
+    """Ask for substantive continuation of one beat; preserve all accepted text and quotes."""
+    chars = sum(len(line['text']) for line in draft['lines'])
+    line = min(draft['lines'], key=lambda item: len(item['text']))
+    schema = {'type': 'object', 'properties': {'line_id': {'type': 'string'}, 'continuation': {'type': 'string'}}, 'required': ['line_id', 'continuation'], 'additionalProperties': False}
+    prompt = '''只补写指定段落的一段自然续文，不重写整稿，不返回其他段落。
+把原段落已有事实解释清楚，补入有信息量的步骤、因果或简短对话。每句简短，但续文总字数必须达到 minimum_additional_chars。
+不得复述原句、填充空话、编造已收到的观众互动或把未知情况说成已经验证成功。
+返回 {"line_id":"指定ID","continuation":"直接接在原段落之后的台词"}，不要重复原段落。
+DATA:\n''' + json.dumps({'input': data, 'plan': plan, 'draft': draft, 'line_id': line['id'], 'minimum_additional_chars': min(budget['max_chars'] - chars, max(80, budget['min_chars'] - chars + 40)), 'maximum_additional_chars': budget['max_chars'] - chars}, ensure_ascii=False)
+    expansion = call(prompt, repair_mode=True, response_schema=schema)
+    if not isinstance(expansion, dict) or expansion.get('line_id') != line['id'] or not isinstance(expansion.get('continuation'), str) or not expansion['continuation'].strip():
+        raise ValueError('invalid beat expansion')
+    return {**draft, 'lines': [{**item, 'text': item['text'] + expansion['continuation']} if item['id'] == line['id'] else dict(item) for item in draft['lines']]}
+
+
+def generate_valid_draft(call, prompt, data, plan, selected, budget, config, trace):
+    """Repair drafts, then expand short beats within the unchanged six-call budget."""
+    obj = None
+    problems = []
+    trace['draft_attempts'] = []
+    for attempt in range(5):
+        previous = obj
+        shortfall = isinstance(previous, dict) and len(problems) == 1 and problems[0].get('code') == 'duration' and problems[0].get('chars', 0) < budget['min_chars']
+        if attempt > 2 and not shortfall:
+            break
+        obj = None
+        mode = 'full_draft'
+        try:
+            if attempt >= 2 and shortfall:
+                mode = 'expand_beat'
+                obj = expand_short_draft(call, previous, data, plan, budget)
+            else:
+                obj = call(prompt, repair_mode=attempt > 0)
+            problems = validate_draft(obj, budget, config)
+        except (ValueError, TypeError, KeyError, AttributeError) as exc:
+            # A bad model response is repairable; it must never escape the final
+            # structure/content validator or become a partially accepted script.
+            problems = [{'code': 'format', 'reason': str(exc)[:200]}]
+        constraints = repair_constraints(obj, budget)
+        trace['draft_attempts'].append({
+            'attempt': attempt + 1, 'mode': mode, 'issues': problems,
+            'chars': constraints['current_chars'],
+        })
+        if attempt == 0:
+            trace['initial_draft'] = obj
+            trace['initial_issues'] = problems
+        if not problems:
+            return obj
+        prompt = '''修复本次直播草稿，返回完整正文 JSON，不返回补丁或解释。
+保留本次人设、事实和话题。简短表达指每句简洁，不得减少所要求的段落数或总字数。
+按 constraints 补足有实际信息的对话和步骤，优先写7段，每段2至3个简短句子；
+总字数必须在 min_chars 与 max_chars 内，missing_chars 是当前至少还缺少的字数。
+不得重复同一段、堆砌空话、增添舞台说明或编造已发生的观众互动来补字数。
+段落 ID 从 L001 连续编号；每段 text 为非空台词。quotables 必须逐字来自对应正文。
+严格输出 {"lines":[{"id":"L001","text":"台词"}],"quotables":[{"line_id":"L001","quote":"正文原文","why_shareable":"原因"}]}。
+DATA:\n''' + json.dumps({
+            'input': data, 'plan': plan, 'selected': selected, 'draft': obj,
+            'previous_output': trace['raw_outputs'][-1],
+            'issues': problems, 'constraints': constraints,
+        }, ensure_ascii=False)
+    trace['remaining_issues'] = problems
+    raise ClipValidationError(problems, budget, constraints['current_chars'])
+
+
 def generate_clip(owner,name,persona,background,topic,language,config):
     start=time.perf_counter();rate=float(config.get('speech_rate',1))
     if not .7<=rate<=1.3:raise ValueError('speech_rate must be .7..1.3')
@@ -64,12 +157,12 @@ def generate_clip(owner,name,persona,background,topic,language,config):
     budget={'target_seconds':target,'min_chars':round(60*cps),'max_chars':round(min(120,target+25)*cps),'estimate_scope':'planning only; final WAV must be 60..120 seconds'}
     trace={'version':'legacy-v4-shareable-v1','status':'generating','budget':budget,'calls':0,'raw_outputs':[]}
     owner.last_trace=trace
-    def call(prompt, review_mode=False, repair_mode=False):
+    def call(prompt, review_mode=False, repair_mode=False, response_schema=None):
         if trace['calls']>=6:raise ValueError('clip call budget exhausted')
         trace['calls']+=1
         call_start=time.perf_counter()
         caller = getattr(owner.llm, 'call_structured', None)
-        options = {'response_schema': DRAFT_SCHEMA if 'plan' in trace else PLAN_SCHEMA} if callable(caller) else {}
+        options = {'response_schema': response_schema or (DRAFT_SCHEMA if 'plan' in trace else PLAN_SCHEMA)} if callable(caller) else {}
         caller = caller if callable(caller) else owner.llm.call
         raw=caller(prompt,system=("你是证据审查器。对照DATA.input的人设、background和topic审查DATA.draft；草稿否定用户给定的已发生事件、替换其核心对象或虚构已收到的观众互动，必须引用原句并判revise，不能作为幽默豁免。不创作、不润色、不推测不存在的原作规则。id必须复制已有L001格式，quote必须逐字复制对应行中的连续子串，不加行号、引号或省略。时长由程序检查，禁止为时长创造虚拟行。人物正常提问、回顾时态、普通动作不自动构成问题。只判断叙述事实之间真实无法共存的矛盾。角色对话中的嘴硬、撒谎、误会、反话不是事实约束；例如他说顺路实际绕远正是笑点，绝不能当逻辑冲突。叙述者从对方行为推断动机是允许的，无需对方亲口承认。只判断明确事实冲突或听不懂的因果。资料没写某个普通细节不等于冲突；比喻不是物理事实，正常目测/触感、后来发生的事无需逐步铺垫。禁止把个人文风偏好当成错误，偏好写在preferences。每个reason最多60字。最多3个问题。返回指定JSON。" if review_mode else "你是口语脚本修复编辑。必须真正修改被指出的问题；禁止复述原稿或解释修改。按用户要求返回正文JSON和引用句。以DATA.input给定事实为准；草稿中与其冲突的情节必须改掉，不能保留为反转。事实和人物关系保留，删除花哨动作特写及不是X是Y句式，直接说事件。修复时长靠新增有因果的对话，不能重复和升华。" if repair_mode else SYSTEM),max_tokens=3000,**options);trace['raw_outputs'].append(raw)
         trace.setdefault('call_details',[]).append({'review_mode':review_mode,'seconds':round(time.perf_counter()-call_start,3),'input_sha256':hashlib.sha256(prompt.encode()).hexdigest()})
@@ -102,13 +195,7 @@ DATA:\n'''+json.dumps(data,ensure_ascii=False))
         prompt='''根据选中的事件写完整60–120秒中文口头clip。必须写7段，每段约50–65个汉字，总计约350–450字（以预算为准）。不能交一个150字的大纲。用实质对话和递进支撑，禁止重复铺垫、动作旁白、抽象感悟凑字数。开头有听下去的问题，中间至少两次新信息推进，结尾兑现开头。1–2句能单独引用的有趣话必须长在故事里，贴这个人物，不能只是给物件加人格。口吻是对直播观众聊趣事，可以有接话、复述对方的原话和轻轻吐槽；每个对话来回有实际信息，不要像默片只描写人的手、表情和动作。不要每段重新开场，不要介绍自己人设。
 返回 {lines:[{id:"L001",text:"可直接说的台词"}...5至10段],quotables:[{line_id,quote:"对应正文精确原文",why_shareable}]}。
 DATA:\n'''+json.dumps({'input':data,'plan':plan,'selected':selected},ensure_ascii=False)
-        obj=call(prompt);problems=validate_draft(obj,budget,config);trace['initial_draft']=obj;trace['initial_issues']=problems
-        # Semantic review is temporarily disabled for live recording. Keep the
-        # deterministic draft constraints and one bounded repair for those only.
-        if problems:
-            obj=call('修复草稿的程序校验问题。输出{lines:[{id,text}],quotables:[{line_id,quote,why_shareable}]}。只修复issues列出的格式、字数、引用或表达问题，保留本次人设与事实。长度在budget内。DATA:\n'+json.dumps({'input':data,'draft':obj,'issues':problems},ensure_ascii=False),repair_mode=True)
-            problems=validate_draft(obj,budget,config)
-        if problems:raise ValueError('clip constraints unresolved: '+json.dumps(problems,ensure_ascii=False))
+        obj=generate_valid_draft(call,prompt,data,plan,selected,budget,config,trace)
         trace.update(status='completed',final_draft=obj,chars=sum(len(l['text']) for l in obj['lines']),semantic_status='skipped',audio_status='not_measured')
         return [ScriptLineV4(id=l['id'],text=l['text'],stage='Hook' if i==0 else 'Resolution' if i==len(obj['lines'])-1 else 'Build-up',interruption_cost=.4,key_info=[]) for i,l in enumerate(obj['lines'])]
     except Exception as exc:

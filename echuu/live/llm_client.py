@@ -7,6 +7,8 @@ from __future__ import annotations
 import os
 from typing import Optional
 
+from echuu.diagnostics import diagnostic
+
 
 class LLMClient:
     """Claude LLM 客户端（仅真实模式）。"""
@@ -21,7 +23,7 @@ class LLMClient:
                 import anthropic
 
                 self.client = anthropic.Anthropic(api_key=self.api_key)
-                print(f"LLM 已初始化: {self.model}")
+                diagnostic(f"LLM 已初始化: {self.model}")
             except ImportError:
                 raise ImportError("anthropic 未安装，请先安装 anthropic")
         else:

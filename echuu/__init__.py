@@ -15,67 +15,74 @@ Example usage:
         background="前上班族，现全职主播"
     )
 
-    for step in engine.run_sync():
+    for step in engine.run():
         print(step)
 """
 
-__version__ = "0.1.0"
+try:
+    from ._version import __version__
+except ImportError:
+    __version__ = "0+unbuilt"
 
-# Main engine - the primary entry point
-from .live.engine import EchuuLiveEngine
-
-# Core components for customization
-from .core.story_nucleus import StoryNucleus
-from .core.emotion_mixer import EmotionMixer, EmotionConfig
-from .core.trigger_bank import TriggerBank, TriggerTemplate
+from .config import EngineConfig, TTSConfig
 from .core.digression_db import DigressionDB
-from .core.structure_breaker import StructureBreaker
-from .core.pattern_analyzer import PatternAnalyzer
 from .core.drama_amplifier import DramaAmplifier
+from .core.emotion_mixer import EmotionConfig, EmotionMixer
+from .core.pattern_analyzer import PatternAnalyzer
 
 # PerformerCue - Expression and gesture annotation
 from .core.performer_cue import (
-    PerformerCue,
-    EmotionCue,
-    GestureCue,
-    LookCue,
     BlinkCue,
-    LipsyncCue,
-    CameraCue,
-    EmotionKey,
-    LookTarget,
     BlinkMode,
+    CameraCue,
+    EmotionCue,
+    EmotionKey,
+    GestureCue,
+    LipsyncCue,
+    LookCue,
+    LookTarget,
+    PerformerCue,
     infer_emotion_from_text,
 )
+from .core.persona_analyst import PersonaAnalyst
+
+# V5 core
+from .core.persona_model import PersonaModel, RichPersona
+from .core.story_core import StoryCore
+
+# Core components for customization
+from .core.story_nucleus import StoryNucleus
+from .core.structure_breaker import StructureBreaker
+from .core.trigger_bank import TriggerBank, TriggerTemplate
+from .core.unit import AcousticHint, Rupture, ScriptLine, Show, Unit
+from .core.unit_planner import UnitPlanner
+from .generators.example_sampler import ExampleSampler
+
+# Generators
+from .generators.script_writer import ScriptWriter
+from .live.danmaku import DanmakuEvaluator, DanmakuHandler
+
+# Main engine - the primary entry point
+from .live.engine import EchuuLiveEngine
+from .live.gemini_client import GeminiClient
+from .live.llm_client import LLMClient
+from .live.llm_factory import create_llm_client
+from .live.performer import PerformerV3
+from .live.response_generator import DanmakuResponseGenerator
+
+# Live performance components
+from .live.state import Danmaku, PerformanceState, PerformerMemory
+from .live.tts_client import TTSClient
 
 # VRM mapping
 from .vrm.mapper import VRMExpressionMapper, VRMVersion
 from .vrm.presets import GESTURE_PRESETS, GestureCategory, get_gesture_by_emotion
 
-# Generators
-from .generators.script_writer import ScriptWriter
-from .generators.example_sampler import ExampleSampler
-
-# V5 core
-from .core.persona_model import PersonaModel, RichPersona
-from .core.persona_analyst import PersonaAnalyst
-from .core.story_core import StoryCore
-from .core.unit import Show, Unit, Rupture, ScriptLine, AcousticHint
-from .core.unit_planner import UnitPlanner
-
-# Live performance components
-from .live.state import Danmaku, PerformerMemory, PerformanceState
-from .live.performer import PerformerV3
-from .live.llm_client import LLMClient
-from .live.gemini_client import GeminiClient
-from .live.llm_factory import create_llm_client
-from .live.tts_client import TTSClient
-from .live.danmaku import DanmakuHandler, DanmakuEvaluator
-from .live.response_generator import DanmakuResponseGenerator
-
 __all__ = [
     # Version
     "__version__",
+    "EngineConfig",
+    "TTSConfig",
     # Main engine
     "EchuuLiveEngine",
     # Core
@@ -133,3 +140,19 @@ __all__ = [
     "DanmakuEvaluator",
     "DanmakuResponseGenerator",
 ]
+
+from .session import LiveSession
+from .session_types import (
+    AudioDescriptor,
+    Interaction,
+    PerformanceStep,
+    SessionEvent,
+    SessionInput,
+    SessionOptions,
+)
+
+__all__ += ["AudioDescriptor", "Interaction", "LiveSession", "PerformanceStep", "SessionEvent", "SessionInput", "SessionOptions"]
+
+from .session_extensions import GiftBatchInput, GiftItem, SessionArtifacts
+
+__all__ += ["GiftBatchInput", "GiftItem", "SessionArtifacts"]

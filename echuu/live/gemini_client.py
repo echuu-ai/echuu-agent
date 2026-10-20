@@ -6,8 +6,9 @@ Supports Gemini 3 Pro, Flash, and Image generation models.
 from __future__ import annotations
 
 import os
-from typing import Optional, Literal
+from typing import Literal, Optional
 
+from echuu.diagnostics import diagnostic
 
 # Valid thinking levels for Gemini 3
 ThinkingLevel = Literal["low", "medium", "high", "minimal"]
@@ -61,9 +62,9 @@ class GeminiClient:
                 from google import genai
 
                 self.client = genai.Client(api_key=self.api_key)
-                print(f"Gemini LLM 已初始化: {self.model}")
+                diagnostic(f"Gemini LLM 已初始化: {self.model}")
                 if self.thinking_level:
-                    print(f"  Thinking Level: {self.thinking_level}")
+                    diagnostic(f"  Thinking Level: {self.thinking_level}")
             except ImportError:
                 raise ImportError("google-genai 未安装，请先运行: pip install google-genai")
         else:
@@ -138,7 +139,7 @@ class GeminiClient:
             # Handle empty responses (can happen with minimal thinking)
             result_text = response.text
             if not result_text or result_text.strip() == "":
-                print(f"[Gemini] 收到空响应，thinking_level={effective_thinking}，重试中...")
+                diagnostic(f"[Gemini] 收到空响应，thinking_level={effective_thinking}，重试中...")
                 # Retry with higher thinking level
                 if self._is_gemini3 and effective_thinking in ["low", "minimal"]:
                     config_kwargs["thinking_config"] = types.ThinkingConfig(
@@ -189,6 +190,7 @@ class GeminiClient:
 
         try:
             import base64
+
             from google.genai import types
 
             # For media_resolution, we need v1alpha API

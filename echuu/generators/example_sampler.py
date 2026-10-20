@@ -10,6 +10,8 @@ import re
 from pathlib import Path
 from typing import Dict, Iterable, List
 
+from echuu.diagnostics import diagnostic
+
 
 class ExampleSampler:
     """
@@ -25,9 +27,9 @@ class ExampleSampler:
                 for line in f:
                     if line.strip():
                         self.clips.append(json.loads(line))
-            print(f"ExampleSampler: 加载了 {len(self.clips)} 个 clips")
+            diagnostic(f"ExampleSampler: 加载了 {len(self.clips)} 个 clips")
         else:
-            print(f"clips 文件不存在: {clips_path}")
+            diagnostic(f"clips 文件不存在: {clips_path}")
 
         self.categorize_clips()
 
@@ -82,14 +84,14 @@ class ExampleSampler:
             else:
                 self.by_structure["linear"].append(clip)
 
-        print(
+        diagnostic(
             "   情绪分类: 高情绪={}, 日常={}, 叙事={}".format(
                 len(self.by_emotion["high_emotion"]),
                 len(self.by_emotion["casual"]),
                 len(self.by_emotion["storytelling"]),
             )
         )
-        print(
+        diagnostic(
             "   结构分类: 跑题={}, 互动={}, 线性={}".format(
                 len(self.by_structure["digressive"]),
                 len(self.by_structure["interactive"]),
@@ -113,7 +115,7 @@ class ExampleSampler:
             digressive = self.by_structure["digressive"]
 
         if not available:
-            print(f"没有可用的 clips (language={language})")
+            diagnostic(f"没有可用的 clips (language={language})")
             return []
 
         samples: List[Dict] = []
