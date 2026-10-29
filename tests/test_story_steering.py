@@ -9,6 +9,8 @@ docs/research/2026-09-11-fewshot-leakage-retest.md):
 """
 from __future__ import annotations
 
+import json
+
 from echuu.core.persona_model import PersonaModel
 from echuu.core.story_core import StoryCore
 from echuu.core.unit import AcousticHint, ScriptLine, Show, Unit
@@ -25,6 +27,12 @@ class _EchoLLM:
 
     def generate(self, prompt: str) -> str:
         self.prompts.append(prompt)
+        if "DATA：" in prompt:
+            data = json.loads(prompt.split("DATA：", 1)[1])
+            roles = ("接住", "跟进", "回主题")
+            return json.dumps({"lines": [
+                f"[{roles[i]}]{data['trigger']}" for i in range(len(data['lines']))
+            ]}, ensure_ascii=False)
         if "上一句刚沿着三个线索跑了" in prompt:
             return "[回主线]沿线索讲完了"
         if "这一句必须沿着三个线索讲一小段支线" in prompt:
@@ -80,9 +88,9 @@ def test_danmaku_rewrite_lands_in_the_actual_next_unplayed_line():
     dm = Danmaku(text="折叠屏把年终奖红包夹住了，怎么拿出来？", user="观众A", kind="chat")
     note = eng._steer_remaining_show(dm)
     after = _all_line_texts(eng.state.show)
-    # Only the two lines strictly after current_line_in_unit changed.
+    # The next three unaired lines form one bounded continuation.
     changed = [i for i, (b, a) in enumerate(zip(before, after)) if b != a]
-    assert changed == [1, 2]
+    assert changed == [1, 2, 3]
     assert "红包" in eng.state.show.units[0].lines[1].text
     assert note  # a real note, not silence
 
@@ -94,7 +102,7 @@ def test_already_aired_lines_are_never_touched():
     eng._steer_remaining_show(dm)
     assert eng.state.show.units[0].lines[0].text == "原定第0-0句台词"
     assert eng.state.show.units[0].lines[1].text == "原定第0-1句台词"
-    # only line[2] (and possibly the next unit's line[0]) could have changed
+    # The continuation starts strictly after the last aired line.
     assert eng.state.show.units[0].lines[2].text != "原定第0-2句台词"
 
 
@@ -141,7 +149,7 @@ def test_followthrough_disabled_during_the_tight_interact_window_cadence():
 
 def test_simultaneous_gift_and_danmaku_land_on_distinct_lines_in_priority_order():
     """Gift outranks plain chat in _pick_danmaku; processing them one at a
-    time (as run()'s cooldown/quota naturally spaces them) must not let the
+    time, with story lines between them, must not let the
     second overwrite the first's target line."""
     eng, llm = _make_engine(n_units=1, lines_per_unit=5)
     eng.state.danmaku_queue = [
@@ -151,8 +159,7 @@ def test_simultaneous_gift_and_danmaku_land_on_distinct_lines_in_priority_order(
     first = eng._pick_danmaku()
     assert first.kind == "gift"  # gift outranks plain chat regardless of queue order
     eng._steer_remaining_show(first, allow_followthrough=False)
-    # Simulate two lines actually being played before the next interleave
-    # opportunity (matches run()'s normal-cadence cooldown of >=2 lines).
+    # Simulate two lines actually being played before the next interaction.
     eng.state.current_line_in_unit = 2
 
     second = eng._pick_danmaku()
@@ -165,3 +172,74 @@ def test_simultaneous_gift_and_danmaku_land_on_distinct_lines_in_priority_order(
     # each interaction's content landed on its own line, not on the other's
     assert "贴膜" not in texts[3]
     assert "红包" not in texts[1]
+
+
+def test_consecutive_batches_preserve_unaired_consequences():
+    eng, _ = _make_engine(n_units=1, lines_per_unit=9)
+    eng._steer_remaining_show(Danmaku(text="先给妈妈买蛋糕", user="A"))
+    first_continuation = _all_line_texts(eng.state.show)[1:4]
+
+    # A second interaction arrives after only the first rewritten line aired.
+    eng.state.current_line_in_unit = 1
+    eng._steer_remaining_show(Danmaku(text="再去取快递", user="B"))
+    texts = _all_line_texts(eng.state.show)
+    assert texts[1:4] == first_continuation
+    assert all("取快递" in text for text in texts[4:7])
+    assert texts[7:] == ["原定第0-7句台词", "原定第0-8句台词"]
+    assert id(eng.state.show.units[0].lines[1]) not in eng.state._steered_line_ids
+
+
+def test_tangent_and_batch_keep_each_others_pending_lines():
+    eng, _ = _make_engine(n_units=1, lines_per_unit=10)
+    eng._steer_remaining_show(Danmaku(text="先给妈妈买蛋糕", user="A"))
+    eng.state.current_line_in_unit = 1
+    eng._steer_remaining_show(Danmaku(
+        text="", user="B", kind="tangent", entities=[{"label": "雨伞"}],
+    ))
+    protected = _all_line_texts(eng.state.show)[1:6]
+    assert "支线" in protected[3] and "回主线" in protected[4]
+
+    eng.state.current_line_in_unit = 2
+    eng._steer_remaining_show(Danmaku(text="再去取快递", user="C"))
+    texts = _all_line_texts(eng.state.show)
+    assert texts[1:6] == protected
+    assert all("取快递" in text for text in texts[6:9])
+
+
+def test_rejected_batch_does_not_reserve_future_lines(tmp_path, monkeypatch):
+    from echuu.harness.store import ArtifactStore
+
+    eng, _ = _make_engine(n_units=1, lines_per_unit=7)
+    eng._harness_directory = tmp_path
+    eng._harness_runtime_store = ArtifactStore(tmp_path / "runtime", "runtime")
+    eng._harness_runtime_llm = None
+    eng._harness_content = {"fixture": {}}
+    verdicts = iter(("needs_review", "accepted"))
+
+    def review(text, fixture, llm, store, parent, rounds):
+        return text, [], {"status": next(verdicts)}, parent
+
+    monkeypatch.setattr("echuu.harness.repair.run_repair", review)
+    original = _all_line_texts(eng.state.show)
+    eng._steer_remaining_show(Danmaku(text="拒绝这次改写", user="A"))
+    assert _all_line_texts(eng.state.show) == original
+    assert not eng.state._steered_line_ids
+
+    eng._steer_remaining_show(Danmaku(text="接受这次改写", user="B"))
+    texts = _all_line_texts(eng.state.show)
+    assert all("接受这次改写" in text for text in texts[1:4])
+    assert texts[4:] == original[4:]
+    assert len(eng.state._steered_line_ids) == 3
+
+
+def test_replacing_show_resets_pending_continuation():
+    from copy import copy
+
+    eng, _ = _make_engine(n_units=1, lines_per_unit=7)
+    eng._steer_remaining_show(Danmaku(text="旧节目方向", user="A"))
+    # A new Show may reuse script objects; its reservation history is fresh.
+    eng.state.show = copy(eng.state.show)
+    eng._steer_remaining_show(Danmaku(text="新节目方向", user="B"))
+    texts = _all_line_texts(eng.state.show)
+    assert all("新节目方向" in text for text in texts[1:4])
+    assert texts[4] == "原定第0-4句台词"

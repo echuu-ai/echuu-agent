@@ -374,7 +374,7 @@ class CosyVoiceTTS:
         self.volume = int(os.getenv("TTS_VOLUME", "50"))
         self.pitch_rate = float(os.getenv("TTS_PITCH_RATE", "1.0"))
         self.bit_rate = int(os.getenv("TTS_BIT_RATE", "128"))
-        self.timeout = float(os.getenv("TTS_TIMEOUT", "60"))
+        self.timeout = float(os.getenv("TTS_TIMEOUT", "12"))
 
         region = os.getenv("TTS_REGION", "cn").lower()
         self.ws_url = os.getenv("TTS_WS_URL")
@@ -471,8 +471,11 @@ class CosyVoiceTTS:
             qwen_tts_realtime.commit()
         qwen_tts_realtime.finish()
 
-        callback.wait_for_complete(self.timeout)
+        completed = callback.wait_for_complete(self.timeout)
         qwen_tts_realtime.close()
+        if not completed:
+            print("[TTS] 等待音频超时，本句保留字幕")
+            return b""
         
         audio_data = callback.get_audio()
         # 如果返回的是PCM，转换为WAV

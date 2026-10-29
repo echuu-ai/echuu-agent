@@ -180,3 +180,112 @@ def test_degraded_serve_still_runs_the_audience_safety_net():
 def test_contrast_with_dash_does_not_escape_guard():
     from echuu.generators.legacy_v4 import issues_for
     assert issues_for([{'id':'L001','text':'不是修伞，也不是修横幅——是把两代人没说完的话接上了。'}],{})
+
+
+@pytest.mark.parametrize('missing_quote', [False, True])
+def test_fast_clip_only_calls_writer_once(monkeypatch, missing_quote):
+    import json
+    from echuu.generators.legacy_v4 import ScriptGeneratorV4
+    monkeypatch.setenv('ECHUU_FAST_CLIP', '1')
+    d=draft()
+    for line in d['lines']:
+        line['text']='昨天我问他为什么站在门口，他说只是顺路。我就指着他手里那把伞问，天气这么好，怎么还带了两把伞。他看了看窗外，我才知道他一直在等人。'
+    d['quotables']=[{'line_id':'L001','quote':'怎么还带了两把伞'}]
+    class Fake:
+        calls=0
+        def call(self,*args,**kwargs):
+            self.calls+=1
+            return json.dumps(d,ensure_ascii=False)
+    if missing_quote: d['quotables']=[]
+    llm=Fake();g=ScriptGeneratorV4(llm)
+    assert len(g.generate('Cory','人设','背景','主题',character_config={'output_format':'shareable_clip'}))==5
+    assert llm.calls==1
+    assert g.last_trace['semantic_status']=='skipped'
+    assert bool(g.last_trace['quality_warnings']) == missing_quote
+
+
+@pytest.mark.parametrize('needs_repair', [False, True])
+def test_structured_writer_does_not_apply_draft_schema_to_reviews(monkeypatch, needs_repair):
+    import json
+    from echuu.generators.clip_schema import PLAN_SCHEMA, DRAFT_SCHEMA
+    from echuu.generators.legacy_v4 import ScriptGeneratorV4
+    monkeypatch.delenv('ECHUU_FAST_CLIP', raising=False)
+    plan={'candidates':[dict(id='a',premise='误会',expectation='拒绝',surprise='偷偷帮忙',resolution='一起完成',character_choice='指出嘴硬',share_reason='亲近')],'selected_id':'a','voice_design':{'provenance':'改编'}}
+    d=draft()
+    for line in d['lines']:
+        line['text']='昨天我问他为什么站在门口，他说只是顺路。我就指着他手里那把伞问，天气这么好，怎么还带了两把伞。他看了看窗外，我才知道他一直在等人。'
+    d['quotables']=[{'line_id':'L001','quote':'怎么还带了两把伞'}]
+    passing={'verdict':'pass','issues':[]}
+    rejection={'verdict':'revise','issues':[{'id':'L001','quote':'昨天','reason':'故事重复'}]}
+
+    class Fake:
+        def __init__(self):
+            self.schemas=[]
+            self.review_calls=0
+        def call_structured(self, prompt, system='', response_schema=None, **kwargs):
+            self.schemas.append(response_schema)
+            return json.dumps(plan if len(self.schemas)==1 else d,ensure_ascii=False)
+        def call(self, prompt, system='', **kwargs):
+            assert '证据审查器' in system
+            assert 'response_schema' not in kwargs
+            self.review_calls+=1
+            return json.dumps(rejection if needs_repair and self.review_calls==1 else passing,ensure_ascii=False)
+
+    llm=Fake();g=ScriptGeneratorV4(llm)
+    assert len(g.generate('角色','人设','背景','话题',character_config={'output_format':'shareable_clip'}))==5
+    assert llm.schemas == [PLAN_SCHEMA,DRAFT_SCHEMA] + ([DRAFT_SCHEMA] if needs_repair else [])
+    assert llm.review_calls == (2 if needs_repair else 1)
+    assert g.last_trace['status']=='completed'
+    assert g.last_trace['semantic_status']=='reviewed'
+    assert sum(c['repair_mode'] for c in g.last_trace['call_details'])==int(needs_repair)
+
+
+def test_fast_clip_uses_draft_schema_and_rejects_malformed_lines(monkeypatch):
+    import json
+    from echuu.generators.clip_schema import DRAFT_SCHEMA
+    from echuu.generators.legacy_v4 import ScriptGeneratorV4
+    monkeypatch.setenv('ECHUU_FAST_CLIP','1')
+    d=draft()
+    d['lines'][0]['id']='not-a-line-id'
+
+    class Fake:
+        calls=0
+        def call_structured(self, prompt, system='', response_schema=None, **kwargs):
+            self.calls+=1
+            assert response_schema == DRAFT_SCHEMA
+            return json.dumps(d,ensure_ascii=False)
+        def call(self, *args, **kwargs):
+            raise AssertionError('fast mode must use the structured writer once')
+
+    llm=Fake();g=ScriptGeneratorV4(llm)
+    with pytest.raises(ValueError,match='invalid clip IDs'):
+        g.generate('角色','人设','背景','话题',character_config={'output_format':'shareable_clip'})
+    assert llm.calls==1
+    assert g.last_trace['status']=='needs_review'
+
+
+@pytest.mark.parametrize('failure', ['provider','parse'])
+def test_failed_structured_calls_retain_diagnostics_and_original_exception(monkeypatch, failure):
+    from echuu.generators.legacy_v4 import ScriptGeneratorV4
+    monkeypatch.setenv('ECHUU_FAST_CLIP','1')
+    provider_error=RuntimeError('provider unavailable')
+
+    class Fake:
+        def call_structured(self, *args, **kwargs):
+            if failure=='provider':raise provider_error
+            return 'invalid json'
+        def call(self, *args, **kwargs):
+            raise AssertionError('structured errors must not trigger a second call')
+
+    g=ScriptGeneratorV4(Fake())
+    with pytest.raises(RuntimeError if failure=='provider' else ValueError) as caught:
+        g.generate('角色','人设','背景','话题',character_config={'output_format':'shareable_clip'})
+    if failure=='provider':assert caught.value is provider_error
+    assert g.last_trace['calls']==1
+    assert g.last_trace['status']=='needs_review'
+    detail=g.last_trace['call_details'][0]
+    assert detail['status']=='failed'
+    assert detail['error_type']==type(caught.value).__name__
+    assert detail['seconds']>=0
+    assert detail['review_mode'] is False and detail['repair_mode'] is False
+    assert len(detail['input_sha256'])==64

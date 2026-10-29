@@ -1,11 +1,4 @@
-"""DanmakuInterleaver — 在讲故事的间隙穿插一句人设化的弹幕回应。
-
-Cursor 式交付：故事行是队列，主播讲完一行后在断点回应一条弹幕，再回到故事。
-约束（spec 反馈）：弹幕只穿插【反应】，不改主播讲故事的方式与关注的重点；
-故事队列本身不被改写。回应简短、带语癖、点名观众、最后拉回正在讲的事。
-
-See docs/superpowers/specs/2026-05-31-rupture-engine-content-quality-design.md.
-"""
+"""直播断句处的简短互动回应；后续剧情由 StorySteerer 单独连续改写。"""
 from __future__ import annotations
 
 from typing import Protocol
@@ -29,9 +22,9 @@ _PROMPT = """\
 {danmaku}
 
 要求：
-- 只回 1-2 句，像真主播随口接一下，自然口语，带一点你的语癖。
-- 点一下这位观众（用名字或泛称），简短反应，然后一句话拉回你正在讲的事。
-- 绝不改变你故事的重点和走向，别开新话题、别长篇大论。
+- 只回一句，15到30字，最多40字。自然口语，不强塞口癖。
+- 简短接住观众或感谢礼物，接下来正文会展开这个方向，不在这里重复正文。
+- 不要强行说回原稿，不复述之前的台词，不添加产品事实。
 - 只输出你要说的话，不要任何解释、不要引号、不要括号说明。
 {card_rules}"""
 
@@ -92,6 +85,8 @@ class DanmakuInterleaver:
             print(f"[DanmakuInterleaver] LLM 调用失败，跳过本次穿插: {exc}")
             return None
         reply = (reply or "").strip().strip('"“”')
+        if len(reply) > 40:
+            return None
         return reply or None
 
     def no_reaction_quip(self, *, identity: str, verbal_tics, topic: str,

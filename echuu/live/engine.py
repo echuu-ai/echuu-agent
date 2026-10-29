@@ -153,7 +153,7 @@ class _LLMGenerateAdapter:
         finally:
             self.calls.append(call)
 
-    def call(self, prompt: str, system: str | None = None, max_tokens: int | None = None) -> str:
+    def call(self, prompt: str, system: str | None = None, max_tokens: int | None = None, response_schema=None) -> str:
         """Expose the historical V4 client contract while retaining telemetry."""
         started = perf_counter()
         token_limit = int(max_tokens or self._max_tokens)
@@ -167,7 +167,11 @@ class _LLMGenerateAdapter:
             "max_tokens": token_limit,
         }
         try:
-            response = self._client.call(prompt, system=system, max_tokens=token_limit)
+            structured = getattr(self._client, 'call_structured', None)
+            if response_schema is not None and callable(structured):
+                response = structured(prompt, system=system, max_tokens=token_limit, response_schema=response_schema)
+            else:
+                response = self._client.call(prompt, system=system, max_tokens=token_limit)
             call.update({
                 "status": "completed",
                 "response_chars": len(response or ""),
@@ -204,6 +208,10 @@ class _LLMGenerateAdapter:
             "failed_calls": sum(call.get("status") == "failed" for call in calls),
             "calls": calls,
         }
+
+
+    def call_structured(self, prompt, system=None, max_tokens=None, response_schema=None):
+        return self.call(prompt, system=system, max_tokens=max_tokens, response_schema=response_schema)
 
 
 class EchuuLiveEngine:
@@ -953,12 +961,12 @@ class EchuuLiveEngine:
             print(f"正在录制... (输出格式: {'MP3' if convert_to_mp3 else 'WAV'})")
         print(f"{'='*60}\n")
 
-        # 弹幕穿插的节奏控制：每讲完一行后可能插一条回应（冷却+每单元上限）
+        # 弹幕穿插的节奏控制：每讲完一行后可能插一条回应。
         lines_since_resp = 0
         resp_in_unit = 0
         last_unit_idx = -1
         last_line_text = ""
-        # 互动窗口（Phase 2-①）：interact 行抛出问题后 N 行内冷却减半、上限翻倍；
+        # 互动窗口：interact 行抛出问题后 N 行内只改写一句，保持紧凑节奏；
         # 一行之后弹幕仍空 → 自嘲兜底一句（人设化生成，不写死）
         interact_window = 0
         interact_question = ""
@@ -999,6 +1007,10 @@ class EchuuLiveEngine:
             yield ev
             if not is_last_chunk:
                 continue  # 行没播完不计弹幕冷却、不判停
+            pending = getattr(self.state, "_steered_line_ids", None)
+            if pending is not None:
+                line = self.state.show.units[unit_idx].lines[self.state.current_line_in_unit]
+                pending.discard(id(line))
             lines_since_resp += 1
             self.state.lines_since_tangent = getattr(self.state, "lines_since_tangent", 99) + 1
             self._maybe_release_tangent_card()
@@ -1015,11 +1027,10 @@ class EchuuLiveEngine:
             if self.state.current_step >= max_steps:
                 break
 
-            # 自然断点：穿插一条弹幕回应（常规：冷却 ≥2 行、每单元 ≤1 条；
-            # 互动窗口内：冷却减半、每单元上限翻倍）
+            # 自然断点：每讲完一行处理一条，互动之间保留正文。
             in_window = interact_window > 0
-            cooldown_ok = lines_since_resp >= (1 if in_window else 2)
-            quota_ok = resp_in_unit < (2 if in_window else 1)
+            cooldown_ok = lines_since_resp >= 1
+            quota_ok = True  # 一行结束最多处理一条，不再等待跨单元
             has_tangent = any(getattr(d, "kind", "") == "tangent" for d in self.state.danmaku_queue)
             if self.state.danmaku_queue and (has_tangent or (cooldown_ok and quota_ok)):
                 resp_ev = self._maybe_interleave_danmaku(unit_idx, last_line_text, in_window)
@@ -1249,15 +1260,36 @@ class EchuuLiveEngine:
                 upcoming.append((unit, start + offset, line))
         return upcoming
 
-    @guard_steering
     def _steer_remaining_show(self, dm, allow_followthrough: bool = True) -> str:
-        """改还没讲的走向：挂 beats + 重写下一句。失败不挡当场回应。
+        """保留已接住的互动后果，再改尚未播出的连续台词。
 
-        allow_followthrough=False（互动窗口内的收紧节奏，冷却只要 1 行）保留
-        单行响应：互动窗口下一次穿插最快只隔 1 行就能触发，若这里仍占用 2 行
-        就有非 tangent 分支之间相互覆盖尚未播出台词的风险；tangent 分支本身
-        总是恰好占 2 行且不受这个收紧节奏影响，不需要这个开关。
+        普通互动最多改三句；紧凑互动窗口只改一句。每行都能回应新弹幕，
+        但下一次改写必须排在上一段已接受、尚未播出的改写之后。
         """
+        show = getattr(self.state, "show", None)
+        if show is None:
+            return "已记下"
+        if getattr(self.state, "_steering_show", None) is not show:
+            self.state._steering_show = show
+            self.state._steered_line_ids = set()
+        upcoming = self._upcoming_script_lines()
+        pending = self.state._steered_line_ids
+        pending.intersection_update(id(line) for _, _, line in upcoming)
+        last_pending = max(
+            (i for i, (_, _, line) in enumerate(upcoming) if id(line) in pending),
+            default=-1,
+        )
+        available = upcoming[last_pending + 1:]
+        before = [(line, line.text) for _, _, line in available]
+        note = self._rewrite_remaining_show(dm, available, allow_followthrough)
+        # guard_steering may restore a rejected proposal. Reserve only edits
+        # that survived that review, so rejection cannot consume future lines.
+        pending.update(id(line) for line, text in before if line.text != text)
+        return note
+
+    @guard_steering
+    def _rewrite_remaining_show(self, dm, upcoming, allow_followthrough: bool) -> str:
+        """改 beats 和待播台词；失败保留原稿，不挡当场回应。"""
         show = getattr(self.state, "show", None)
         if show is None:
             return "已记下"
@@ -1270,7 +1302,6 @@ class EchuuLiveEngine:
             trigger = compose_tangent_text(getattr(dm, "entities", None) or [])
         if getattr(show, "story_core", None) is not None:
             show.story_core = annotate_remaining_beats(show.story_core, trigger)
-        upcoming = self._upcoming_script_lines()
         if not upcoming:
             return "已记下，后面会接住"
         core = getattr(show, "story_core", None)
@@ -1305,41 +1336,17 @@ class EchuuLiveEngine:
                     upcoming[1][2].text = back
                     notes.append("回主线")
             return " · ".join(notes) if notes else "沿着线索讲一小段再回来"
-        _, _, line = upcoming[0]
-        rewritten = self.story_steerer.rewrite_line(
-            spine=spine,
-            topic=self.state.topic,
-            user=dm.user,
-            trigger=trigger,
-            kind=kind,
-            line=getattr(line, "text", "") or "",
+        selected = upcoming[:3 if allow_followthrough else 1]
+        rewritten = self.story_steerer.rewrite_lines(
+            spine=spine, topic=self.state.topic, user=dm.user,
+            trigger=trigger, kind=kind,
+            lines=[line.text for _, _, line in selected],
         )
-        note_parts = []
         if rewritten:
-            line.text = rewritten
-            note_parts.append(rewritten[:48])
-        # One line is a nod; it isn't a plot. Give the interaction an actual
-        # payoff on the next beat too (the red-envelope rescue actually gets
-        # rescued, the screen-protector reminder actually gets acted on)
-        # instead of the story quietly reverting to its unrelated original
-        # script right after the acknowledgment.
-        if allow_followthrough and len(upcoming) > 1:
-            _, _, follow_line = upcoming[1]
-            follow_up = self.story_steerer.rewrite_line(
-                spine=spine,
-                topic=self.state.topic,
-                user=dm.user,
-                trigger=trigger,
-                kind=kind,
-                line=getattr(follow_line, "text", "") or "",
-                role="followthrough",
-            )
-            if follow_up:
-                follow_line.text = follow_up
-                note_parts.append("后续跟进")
-        if note_parts:
-            return " · ".join(note_parts)
-        return "后续会往观众推的方向收"
+            for (_, _, line), text in zip(selected, rewritten):
+                line.text = text
+            return f"已调整后续{len(rewritten)}句：{rewritten[0][:40]}"
+        return "改写未完成，保留原稿并回应观众"
 
     def _maybe_interleave_danmaku(self, unit_idx: int, last_line: str, in_window: bool = False):
         """生成一条人设化弹幕回应并构造 step 事件；失败返回 None（跳过穿插）。"""
