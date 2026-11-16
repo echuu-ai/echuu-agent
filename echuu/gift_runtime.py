@@ -5,6 +5,7 @@ import copy
 
 from .content_language import (
     SPOKEN_GIFT_THANKS, add_speech_language_prompt, has_expected_speech_language,
+    speech_language_instruction,
 )
 import hashlib
 from concurrent.futures import ThreadPoolExecutor
@@ -182,7 +183,8 @@ class GiftRuntime:
             )
         )
         language = getattr(getattr(e, "stream_lang_context", None), "explicit_language", None)
-        prompt = add_speech_language_prompt(prompt, language)
+        instruction = speech_language_instruction(language)
+        options = {"system": instruction} if instruction else {}
         structured = getattr(e.llm_gen, "call", None)
         feedback = ""
         for attempt in range(2):
@@ -191,9 +193,9 @@ class GiftRuntime:
             trace.begin()
             try:
                 raw = (
-                    structured(prompt + feedback, max_tokens=400, response_schema=schema)
+                    structured(prompt + feedback, max_tokens=400, response_schema=schema, **options)
                     if callable(structured)
-                    else e.llm_gen.generate(prompt + feedback)
+                    else e.llm_gen.generate(add_speech_language_prompt(prompt + feedback, language))
                 )
                 if monotonic() >= deadline:
                     raise TimeoutError("Gift model budget exhausted")

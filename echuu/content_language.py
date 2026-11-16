@@ -63,8 +63,12 @@ def has_expected_speech_language(text: str, language: str | None) -> bool:
     return True
 
 
+def speech_language_instruction(language: str | None) -> str:
+    return _SPEECH_PROMPTS.get(language, "")
+
+
 def add_speech_language_prompt(prompt: str, language: str | None) -> str:
-    instruction = _SPEECH_PROMPTS.get(language)
+    instruction = speech_language_instruction(language)
     return f"{instruction}\n{prompt}" if instruction else prompt
 
 

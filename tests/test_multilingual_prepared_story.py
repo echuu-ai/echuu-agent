@@ -123,3 +123,19 @@ def test_unbound_rooms_prepare_all_sections_in_configured_language(language):
         assert engine.stream_lang_context.explicit_language == language
     finally:
         driver.close()
+
+
+def test_structured_provider_gets_selected_language_as_system_instruction():
+    calls = []
+
+    def provider_call(prompt, *, system):
+        calls.append((prompt, system))
+        return "I heard the bell under the cat's blanket."
+
+    agent = DanmakuInterleaver(SimpleNamespace(call=provider_call))
+    reply = agent.respond(identity="Gumi", verbal_tics=[], topic="猫玩具", last_line="猫が見ていた。",
+                          danmaku_text="猫睡在哪里？", user="Guest", language="en")
+    assert reply
+    prompt, system = calls[0]
+    assert "natural spoken English" in system
+    assert "猫睡在哪里？" in prompt
