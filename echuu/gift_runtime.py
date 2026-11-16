@@ -3,7 +3,9 @@ import logging
 import re
 import copy
 
-from .content_language import add_speech_language_prompt, has_expected_speech_language
+from .content_language import (
+    SPOKEN_GIFT_THANKS, add_speech_language_prompt, has_expected_speech_language,
+)
 import hashlib
 from concurrent.futures import ThreadPoolExecutor
 from time import monotonic, time
@@ -311,7 +313,7 @@ class GiftRuntime:
         )
         originals = [line.text for _, _, line in targets]
         language = getattr(getattr(e, "stream_lang_context", None), "explicit_language", None)
-        thanks = "みんな、ギフトを送ってくれてありがとう！" if language == "ja" else "谢谢大家送来的礼物，心意都收到啦！"
+        thanks = SPOKEN_GIFT_THANKS.get(language, "谢谢大家送来的礼物，心意都收到啦！")
         result = None
         model_budget = min(
             getattr(getattr(e, "config", None), "gift_model_timeout_seconds", 2),

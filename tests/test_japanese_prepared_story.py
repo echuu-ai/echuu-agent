@@ -84,7 +84,7 @@ def test_japanese_saved_script_repairs_wrong_language_and_uses_original_text(mon
     ]
 
     corrupt = parsed.model_dump(mode="json")
-    corrupt["inputs"]["language"] = "en"
+    corrupt["inputs"]["language"] = "fr"
     corrupt["sha256"] = PreparedStory.digest(corrupt)
     with pytest.raises(ValueError, match="Unsupported prepared story language"):
         PreparedStory.model_validate(corrupt)

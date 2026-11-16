@@ -5,7 +5,7 @@ from typing import Literal
 
 from pydantic import Field, JsonValue, TypeAdapter, model_validator
 
-from .content_language import is_prepared_story_language
+from .content_language import is_prepared_story_language, prepared_body_limits
 from .session_types import Contract, SessionInput, SessionOptions
 
 
@@ -55,9 +55,10 @@ class PreparedStory(Contract):
         elif "opening" in self.draft or "closing" in self.draft:
             raise ValueError("Legacy clips cannot contain unchecked rundown")
         card = PersonaCard.from_dict(self.inputs.persona_card)
+        min_chars, max_chars = prepared_body_limits(self.inputs.language)
         issues = validate_draft(
             self.draft,
-            {"min_chars": 264, "max_chars": 506},
+            {"min_chars": min_chars, "max_chars": max_chars},
             {"speech_tics": list(card.speech_tics) if card else [], "language": self.inputs.language},
         )
         if issues:
@@ -86,9 +87,10 @@ class PreparedStory(Contract):
     def capture(cls, inputs, show, trace, *, background):
         if trace.get("status") != "completed" or not is_prepared_story_language(inputs.language):
             raise ValueError("Only fully validated supported clips can be saved")
+        min_chars, max_chars = prepared_body_limits(inputs.language)
         if (
-            trace.get("budget", {}).get("min_chars") != 264
-            or trace.get("budget", {}).get("max_chars") != 506
+            trace.get("budget", {}).get("min_chars") != min_chars
+            or trace.get("budget", {}).get("max_chars") != max_chars
         ):
             raise ValueError("Unsupported clip budget; no relaxed import")
         data = {

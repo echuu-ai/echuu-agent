@@ -5,7 +5,9 @@ import re
 import time
 import os
 from .clip_schema import PLAN_SCHEMA, DRAFT_SCHEMA
-from ..content_language import add_speech_language_prompt, has_expected_speech_language
+from ..content_language import (
+    PREPARED_CHARACTERS_PER_SECOND, add_speech_language_prompt, has_expected_speech_language,
+)
 from .legacy_v4 import ScriptLineV4, SYSTEM_PROMPT, parse_object, issues_for
 
 VOICE_DESIGNS = {
@@ -156,6 +158,13 @@ DATA:\n''' + json.dumps({
     raise ClipValidationError(problems, budget, constraints['current_chars'])
 
 
+_NON_CHINESE_CLIP_RANGES = {
+    "en": ("英语", "105–165", "800–1150"),
+    "ja": ("日语", "50–65", "350–450"),
+    "ko": ("韩语", "55–75", "385–525"),
+}
+
+
 def generate_clip(owner,name,persona,background,topic,language,config):
     config = {**config, 'language': language}
     start=time.perf_counter();rate=float(config.get('speech_rate',1))
@@ -163,7 +172,7 @@ def generate_clip(owner,name,persona,background,topic,language,config):
     target=float(config.get('target_seconds',90))
     if not 60<=target<=120:raise ValueError('shareable clip target must be 60..120 seconds')
     # Conservative planning band; only rendered audio can establish actual duration.
-    cps=float(config.get('measured_chars_per_second',4.4*rate))
+    cps=float(config.get('measured_chars_per_second', PREPARED_CHARACTERS_PER_SECOND.get(language, 4.4) * rate))
     if not 1<=cps<=20:raise ValueError('invalid speech calibration')
     budget={'target_seconds':target,'min_chars':round(60*cps),'max_chars':round(min(120,target+25)*cps),'estimate_scope':'planning only; final WAV must be 60..120 seconds'}
     trace={'version':'legacy-v4-shareable-v1','status':'generating','budget':budget,'calls':0,'raw_outputs':[]}
@@ -176,26 +185,27 @@ def generate_clip(owner,name,persona,background,topic,language,config):
         options = {'response_schema': response_schema or (DRAFT_SCHEMA if 'plan' in trace else PLAN_SCHEMA)} if callable(caller) else {}
         caller = caller if callable(caller) else owner.llm.call
         system = REVIEW_SYSTEM if review_mode else REPAIR_SYSTEM if repair_mode else SYSTEM
-        if language == 'ja':
-            # Only language instructions change. The topic and character data keep their original text.
+        if language in _NON_CHINESE_CLIP_RANGES:
+            name, beat_range, total_range = _NON_CHINESE_CLIP_RANGES[language]
+            # Edit model instructions only. User-supplied topic and character facts stay verbatim.
             instruction, delimiter, data = prompt.partition('DATA:\n')
             instruction = (
-                instruction.replace('中文改编设计', '日语改编设计')
-                .replace('中文口头clip', '日语口头clip')
-                .replace('约50–65个汉字', '约50–65个日文字符')
+                instruction.replace('中文改编设计', f'{name}改编设计')
+                .replace('中文口头clip', f'{name}口头clip')
+                .replace('约50–65个汉字', f'约{beat_range}个字符')
+                .replace('约350–450字', f'约{total_range}个字符')
             )
             prompt = instruction + delimiter + data
             if system == SYSTEM:
-                system = system.replace('中文', '日语')
-        raw = caller(
-            prompt, system=add_speech_language_prompt(system, language), max_tokens=3000, **options
-        )
+                system = system.replace('中文', name)
+            system = add_speech_language_prompt(system, language)
+        raw = caller(prompt, system=system, max_tokens=3000, **options)
         trace['raw_outputs'].append(raw)
         trace.setdefault('call_details',[]).append({'review_mode':review_mode,'seconds':round(time.perf_counter()-call_start,3),'input_sha256':hashlib.sha256(prompt.encode()).hexdigest()})
         return parse_object(raw)
     data={'name':name,'persona':persona,'background':background,'topic':topic,'language':language,'speech_tics':config.get('speech_tics',[]),'voice_design':config.get('voice_design',VOICE_DESIGNS.get(name,{})),'budget':budget,'candidate_count':config.get('candidate_count',2)}
     try:
-        if os.getenv('ECHUU_FAST_CLIP') == '1' and language != 'ja':
+        if os.getenv('ECHUU_FAST_CLIP') == '1' and language not in _NON_CHINESE_CLIP_RANGES:
             trace['plan'] = {'mode': 'single_pass'}
             obj=call('直接写本场完整中文直播剧本JSON，不另做候选规划。7段，共350到450字，段落id依次L001到L007。每段提供新信息，以用户人设和本次话题为准，不能编造已发生的观众互动。未确认新品只当传闻，不编造购买、预售或实测事实。返回 {"lines":[{"id":"L001","text":"台词"}],"quotables":[{"line_id":"L001","quote":"正文中逐字一致的短句","why_shareable":"原因"}]}。JSON内部的双引号必须转义。DATA:\n'+json.dumps(data,ensure_ascii=False))
             problems=validate_draft(obj,budget,config)

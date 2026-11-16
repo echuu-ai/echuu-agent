@@ -20,7 +20,9 @@ from typing import Dict, List, Optional
 from echuu.diagnostics import diagnostic
 
 from ..config import EngineConfig
-from ..content_language import has_expected_speech_language
+from ..content_language import (
+    SPOKEN_ACKNOWLEDGEMENTS, SPOKEN_GIFT_ACKNOWLEDGEMENTS, has_expected_speech_language,
+)
 from ..core.output_safety import sanitize_audience_text
 from ..core.pattern_analyzer import PatternAnalyzer
 from ..core.persona_analyst import PROMPT_VERSION as ANALYST_PROMPT_VERSION
@@ -628,7 +630,9 @@ class EchuuLiveEngine:
                 "prompt_text": render_tuning_guidance(self.tuning_guidance),
             },
         })
-        self.stream_lang_context = setup_stream_language_from_topic(topic, persona, language=language)
+        self.stream_lang_context = setup_stream_language_from_topic(
+            topic, persona, language=language if language != "zh" else None
+        )
         diagnostic(f"🌐 语言设置: {self.stream_lang_context.greeting_style}")
 
         # 用户人设卡（可选）：口癖/称呼/雷点等硬约束，贯穿 analyst/writer/弹幕回应
@@ -1469,8 +1473,8 @@ class EchuuLiveEngine:
                        "recent_spoken": getattr(self.state, "spoken_history", [])[-8:]},
             **({"language": language} if language else {}),
         )
-        if not reply and language == "ja":
-            reply = "コメントを読んだよ、続きを話すね。"
+        if not reply:
+            reply = SPOKEN_ACKNOWLEDGEMENTS.get(language)
         if not reply:
             user = (getattr(dm, "user", "") or "你").strip() or "你"
             snippet = (dm.text or "").strip()[:10]
@@ -1490,10 +1494,10 @@ class EchuuLiveEngine:
             "topic_history": getattr(self.state, "topic_history", []),
         }, interaction=dm.to_public()):
             # A neutral acknowledgment adds no new biography, preference or promise.
-            if language == "ja":
-                reply = "ギフトありがとう、続きを話すね。" if dm.gift_name else "コメントを読んだよ、続きを話すね。"
+            if dm.gift_name:
+                reply = SPOKEN_GIFT_ACKNOWLEDGEMENTS.get(language, f"谢谢你的{dm.gift_name}，我接着聊。")
             else:
-                reply = f"谢谢你的{dm.gift_name}，我接着聊。" if dm.gift_name else "看到你的消息了，我接着聊。"
+                reply = SPOKEN_ACKNOWLEDGEMENTS.get(language, "看到你的消息了，我接着聊。")
         if not has_expected_speech_language(reply, language) or not approve_reply(self, reply):
             return None
         try:

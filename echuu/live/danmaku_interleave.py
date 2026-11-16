@@ -47,6 +47,9 @@ _QUIP_PROMPT = """\
 """
 
 
+_REPLY_LENGTHS = {"en": ("40到90个字符", 120), "ko": ("20到45个字符", 60)}
+
+
 class DanmakuInterleaver:
     def __init__(self, llm: _LLM) -> None:
         self.llm = llm
@@ -75,7 +78,8 @@ class DanmakuInterleaver:
                 card_rules += "\n".join(rules) + "\n"
         if gags:
             card_rules += f"- 如果能自然接上你前面埋的梗（{'；'.join(gags)}），优先顺手接一下。\n"
-        prompt = _PROMPT.format(
+        preferred, max_length = _REPLY_LENGTHS.get(language, ("15到30字", 40))
+        prompt = _PROMPT.replace("15到30字，最多40字", f"{preferred}，最多{max_length}个字符").format(
             identity=identity or "一个主播",
             verbal_tics=tics,
             topic=topic or "（正在讲的事）",
@@ -92,7 +96,7 @@ class DanmakuInterleaver:
             diagnostic(f"[DanmakuInterleaver] LLM 调用失败，跳过本次穿插: {exc}")
             return None
         reply = (reply or "").strip().strip('"“”')
-        if len(reply) > 40 or not has_expected_speech_language(reply, language):
+        if len(reply) > max_length or not has_expected_speech_language(reply, language):
             return None
         return reply or None
 

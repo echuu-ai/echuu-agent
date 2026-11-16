@@ -72,6 +72,7 @@ class StorytellingDriver:
                 "storytelling",
                 tts=tts,
                 card=self._card,
+                language=self.inputs.language,
                 background=merge_brief_into_background(
                     self.inputs.background, self.inputs.topic, self._brief
                 ),
@@ -92,7 +93,7 @@ class StorytellingDriver:
         if self.engine is None:
             self.engine = EchuuLiveEngine(config=self.config)
         e, value = self.engine, self.inputs
-        if value.language == "ja" and self.prepared_story is None:
+        if value.language in {"en", "ja", "ko"} and self.prepared_story is None:
             from .prepared_story import generate_story
 
             self.prepared_story = generate_story(value, self.config, self.options, engine=e)
@@ -139,6 +140,12 @@ class StorytellingDriver:
                     on_phase_callback=lambda _: self._diagnostics.append(
                         {"type": "reasoning", "content": "正在准备内容"}
                     ),
+                )
+            if self.prepared_story is None:
+                from .live.language import setup_stream_language_from_topic
+
+                e.stream_lang_context = setup_stream_language_from_topic(
+                    value.topic, value.persona, language=value.language
                 )
             if future:
                 try:
