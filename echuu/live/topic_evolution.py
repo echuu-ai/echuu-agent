@@ -6,6 +6,8 @@ No partial continuation may commit a topic change.
 from __future__ import annotations
 
 import json
+
+from echuu.content_language import add_speech_language_prompt
 import re
 from dataclasses import dataclass
 
@@ -126,7 +128,9 @@ class TopicEvolution:
                 }},
             },
         }
-        prompt = PROMPT + json.dumps(data, ensure_ascii=False, default=str)
+        prompt = add_speech_language_prompt(
+            PROMPT + json.dumps(data, ensure_ascii=False, default=str), context.get("language")
+        )
         try:
             structured = getattr(self.llm, "call_structured", None)
             if callable(structured):

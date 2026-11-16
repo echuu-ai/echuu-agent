@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 from typing import Protocol
 
+from echuu.content_language import add_speech_language_prompt, has_expected_speech_language
 from echuu.diagnostics import diagnostic
 from echuu.live.untrusted import render_untrusted, sanitize_untrusted
 
@@ -52,7 +53,7 @@ class DanmakuInterleaver:
 
     def respond(self, *, identity: str, verbal_tics, topic: str,
                 last_line: str, danmaku_text: str, user: str,
-                card=None, gags=None, evolution=None) -> str | None:
+                card=None, gags=None, evolution=None, language=None) -> str | None:
         tics = "、".join(verbal_tics) if verbal_tics else "（自然口语）"
         # 人设卡加成：固定称呼；雷点被戳 → 破防加倍；骄傲点被夸/被质疑 → 反应加倍；顺手挂已埋的梗
         card_rules = ""
@@ -86,17 +87,17 @@ class DanmakuInterleaver:
             evolution=json.dumps(evolution or {}, ensure_ascii=False),
         )
         try:
-            reply = self.llm.generate(prompt)
+            reply = self.llm.generate(add_speech_language_prompt(prompt, language))
         except Exception as exc:
             diagnostic(f"[DanmakuInterleaver] LLM 调用失败，跳过本次穿插: {exc}")
             return None
         reply = (reply or "").strip().strip('"“”')
-        if len(reply) > 40:
+        if len(reply) > 40 or not has_expected_speech_language(reply, language):
             return None
         return reply or None
 
     def no_reaction_quip(self, *, identity: str, verbal_tics, topic: str,
-                         question: str) -> str | None:
+                         question: str, language=None) -> str | None:
         """互动点没人理时的自嘲兜底（不写死台词，人设化生成）。"""
         tics = "、".join(verbal_tics) if verbal_tics else "（自然口语）"
         prompt = _QUIP_PROMPT.format(
@@ -106,9 +107,9 @@ class DanmakuInterleaver:
             topic=topic or "（正在讲的事）",
         )
         try:
-            reply = self.llm.generate(prompt)
+            reply = self.llm.generate(add_speech_language_prompt(prompt, language))
         except Exception as exc:
             diagnostic(f"[DanmakuInterleaver] 自嘲兜底生成失败，跳过: {exc}")
             return None
         reply = (reply or "").strip().strip('"“”')
-        return reply or None
+        return reply if reply and has_expected_speech_language(reply, language) else None

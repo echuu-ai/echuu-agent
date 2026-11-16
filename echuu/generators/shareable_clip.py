@@ -5,6 +5,7 @@ import re
 import time
 import os
 from .clip_schema import PLAN_SCHEMA, DRAFT_SCHEMA
+from ..content_language import add_speech_language_prompt, has_expected_speech_language
 from .legacy_v4 import ScriptLineV4, SYSTEM_PROMPT, parse_object, issues_for
 
 VOICE_DESIGNS = {
@@ -26,6 +27,10 @@ SYSTEM = """你是直播杂谈编剧。交付一个观众愿意转给朋友的�
 只输出请求的JSON。"""
 
 
+REVIEW_SYSTEM = "你是证据审查器。对照DATA.input的人设、background和topic审查DATA.draft；草稿否定用户给定的已发生事件、替换其核心对象或虚构已收到的观众互动，必须引用原句并判revise，不能作为幽默豁免。不创作、不润色、不推测不存在的原作规则。id必须复制已有L001格式，quote必须逐字复制对应行中的连续子串，不加行号、引号或省略。时长由程序检查，禁止为时长创造虚拟行。人物正常提问、回顾时态、普通动作不自动构成问题。只判断叙述事实之间真实无法共存的矛盾。角色对话中的嘴硬、撒谎、误会、反话不是事实约束；例如他说顺路实际绕远正是笑点，绝不能当逻辑冲突。叙述者从对方行为推断动机是允许的，无需对方亲口承认。只判断明确事实冲突或听不懂的因果。资料没写某个普通细节不等于冲突；比喻不是物理事实，正常目测/触感、后来发生的事无需逐步铺垫。禁止把个人文风偏好当成错误，偏好写在preferences。每个reason最多60字。最多3个问题。返回指定JSON。"
+REPAIR_SYSTEM = "你是口语脚本修复编辑。必须真正修改被指出的问题；禁止复述原稿或解释修改。按用户要求返回正文JSON和引用句。以DATA.input给定事实为准；草稿中与其冲突的情节必须改掉，不能保留为反转。事实和人物关系保留，删除花哨动作特写及不是X是Y句式，直接说事件。修复时长靠新增有因果的对话，不能重复和升华。"
+
+
 def validate_draft(obj, budget, config):
     lines=obj.get('lines',[])
     if not isinstance(lines,list) or not 5<=len(lines)<=10:raise ValueError('clip needs 5..10 beats')
@@ -34,6 +39,11 @@ def validate_draft(obj, budget, config):
     if any(not isinstance(l.get('text'),str) or not l['text'].strip() for l in lines):raise ValueError('invalid text')
     chars=sum(len(l['text']) for l in lines)
     problems=issues_for(lines,config)
+    problems.extend(
+        {'id': line['id'], 'code': 'wrong_language'}
+        for line in lines
+        if not has_expected_speech_language(line['text'], config.get('language'))
+    )
     if not budget['min_chars']<=chars<=budget['max_chars']:problems.append({'code':'duration','chars':chars})
     quotes=obj.get('quotables',[])
     if not isinstance(quotes,list) or not 1<=len(quotes)<=2:problems.append({'code':'quotable_count'})
@@ -147,6 +157,7 @@ DATA:\n''' + json.dumps({
 
 
 def generate_clip(owner,name,persona,background,topic,language,config):
+    config = {**config, 'language': language}
     start=time.perf_counter();rate=float(config.get('speech_rate',1))
     if not .7<=rate<=1.3:raise ValueError('speech_rate must be .7..1.3')
     target=float(config.get('target_seconds',90))
@@ -164,12 +175,27 @@ def generate_clip(owner,name,persona,background,topic,language,config):
         caller = getattr(owner.llm, 'call_structured', None)
         options = {'response_schema': response_schema or (DRAFT_SCHEMA if 'plan' in trace else PLAN_SCHEMA)} if callable(caller) else {}
         caller = caller if callable(caller) else owner.llm.call
-        raw=caller(prompt,system=("你是证据审查器。对照DATA.input的人设、background和topic审查DATA.draft；草稿否定用户给定的已发生事件、替换其核心对象或虚构已收到的观众互动，必须引用原句并判revise，不能作为幽默豁免。不创作、不润色、不推测不存在的原作规则。id必须复制已有L001格式，quote必须逐字复制对应行中的连续子串，不加行号、引号或省略。时长由程序检查，禁止为时长创造虚拟行。人物正常提问、回顾时态、普通动作不自动构成问题。只判断叙述事实之间真实无法共存的矛盾。角色对话中的嘴硬、撒谎、误会、反话不是事实约束；例如他说顺路实际绕远正是笑点，绝不能当逻辑冲突。叙述者从对方行为推断动机是允许的，无需对方亲口承认。只判断明确事实冲突或听不懂的因果。资料没写某个普通细节不等于冲突；比喻不是物理事实，正常目测/触感、后来发生的事无需逐步铺垫。禁止把个人文风偏好当成错误，偏好写在preferences。每个reason最多60字。最多3个问题。返回指定JSON。" if review_mode else "你是口语脚本修复编辑。必须真正修改被指出的问题；禁止复述原稿或解释修改。按用户要求返回正文JSON和引用句。以DATA.input给定事实为准；草稿中与其冲突的情节必须改掉，不能保留为反转。事实和人物关系保留，删除花哨动作特写及不是X是Y句式，直接说事件。修复时长靠新增有因果的对话，不能重复和升华。" if repair_mode else SYSTEM),max_tokens=3000,**options);trace['raw_outputs'].append(raw)
+        system = REVIEW_SYSTEM if review_mode else REPAIR_SYSTEM if repair_mode else SYSTEM
+        if language == 'ja':
+            # Only language instructions change. The topic and character data keep their original text.
+            instruction, delimiter, data = prompt.partition('DATA:\n')
+            instruction = (
+                instruction.replace('中文改编设计', '日语改编设计')
+                .replace('中文口头clip', '日语口头clip')
+                .replace('约50–65个汉字', '约50–65个日文字符')
+            )
+            prompt = instruction + delimiter + data
+            if system == SYSTEM:
+                system = system.replace('中文', '日语')
+        raw = caller(
+            prompt, system=add_speech_language_prompt(system, language), max_tokens=3000, **options
+        )
+        trace['raw_outputs'].append(raw)
         trace.setdefault('call_details',[]).append({'review_mode':review_mode,'seconds':round(time.perf_counter()-call_start,3),'input_sha256':hashlib.sha256(prompt.encode()).hexdigest()})
         return parse_object(raw)
     data={'name':name,'persona':persona,'background':background,'topic':topic,'language':language,'speech_tics':config.get('speech_tics',[]),'voice_design':config.get('voice_design',VOICE_DESIGNS.get(name,{})),'budget':budget,'candidate_count':config.get('candidate_count',2)}
     try:
-        if os.getenv('ECHUU_FAST_CLIP') == '1':
+        if os.getenv('ECHUU_FAST_CLIP') == '1' and language != 'ja':
             trace['plan'] = {'mode': 'single_pass'}
             obj=call('直接写本场完整中文直播剧本JSON，不另做候选规划。7段，共350到450字，段落id依次L001到L007。每段提供新信息，以用户人设和本次话题为准，不能编造已发生的观众互动。未确认新品只当传闻，不编造购买、预售或实测事实。返回 {"lines":[{"id":"L001","text":"台词"}],"quotables":[{"line_id":"L001","quote":"正文中逐字一致的短句","why_shareable":"原因"}]}。JSON内部的双引号必须转义。DATA:\n'+json.dumps(data,ensure_ascii=False))
             problems=validate_draft(obj,budget,config)

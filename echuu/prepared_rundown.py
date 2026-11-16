@@ -1,6 +1,7 @@
 import json
 from time import perf_counter
 
+from .content_language import add_speech_language_prompt, has_expected_speech_language
 from .core.output_safety import sanitize_audience_text
 from .generators.legacy_v4 import issues_for, parse_object
 
@@ -51,6 +52,8 @@ def validate_sections(draft, inputs, background):
             ):
                 issues.append({"section": section, "code": "sentence_bounds"})
                 continue
+            if not has_expected_speech_language(text, inputs.language):
+                issues.append({"section": section, "code": "wrong_language"})
             result = sanitize_audience_text(text, source_material=source)
             if result.issues or result.text != text:
                 issues.append({"section": section, "code": "content_guard"})
@@ -99,6 +102,7 @@ DATA:\n""" + json.dumps(
         },
         ensure_ascii=False,
     )
+    prompt = add_speech_language_prompt(prompt, inputs.language)
     trace = []
     engine._prepared_rundown_trace = trace
     for attempt in range(3):

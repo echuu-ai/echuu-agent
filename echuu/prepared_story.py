@@ -5,6 +5,7 @@ from typing import Literal
 
 from pydantic import Field, JsonValue, TypeAdapter, model_validator
 
+from .content_language import is_prepared_story_language
 from .session_types import Contract, SessionInput, SessionOptions
 
 
@@ -41,6 +42,8 @@ class PreparedStory(Contract):
 
         if self.sha256 != self.digest(self.model_dump(mode="json")):
             raise ValueError("Prepared story checksum mismatch")
+        if not is_prepared_story_language(self.inputs.language):
+            raise ValueError("Unsupported prepared story language")
         expected = "full-story-v2" if self.schema_version == 2 else "shareable-clip-v1"
         if self.validator_version != expected:
             raise ValueError("Mismatched script validator")
@@ -55,7 +58,7 @@ class PreparedStory(Contract):
         issues = validate_draft(
             self.draft,
             {"min_chars": 264, "max_chars": 506},
-            {"speech_tics": list(card.speech_tics) if card else []},
+            {"speech_tics": list(card.speech_tics) if card else [], "language": self.inputs.language},
         )
         if issues:
             raise ValueError("Prepared story fails original clip constraints")
@@ -81,8 +84,8 @@ class PreparedStory(Contract):
 
     @classmethod
     def capture(cls, inputs, show, trace, *, background):
-        if trace.get("status") != "completed" or not inputs.language.startswith("zh"):
-            raise ValueError("Only fully validated Chinese clips can be saved")
+        if trace.get("status") != "completed" or not is_prepared_story_language(inputs.language):
+            raise ValueError("Only fully validated supported clips can be saved")
         if (
             trace.get("budget", {}).get("min_chars") != 264
             or trace.get("budget", {}).get("max_chars") != 506
@@ -104,8 +107,8 @@ def generate_story(inputs, config, options: SessionOptions, *, engine=None):
     from .live.engine import EchuuLiveEngine
     from .modes.topic_brief import merge_brief_into_background, produce_topic_brief
 
-    if config.story_pipeline != "legacy_v4" or not inputs.language.startswith("zh"):
-        raise ValueError("Prepared stories require the Chinese legacy clip pipeline")
+    if config.story_pipeline != "legacy_v4" or not is_prepared_story_language(inputs.language):
+        raise ValueError("Prepared stories require a supported language and the legacy clip pipeline")
     engine = engine or EchuuLiveEngine(config=config)
     brief = produce_topic_brief(engine.llm, inputs.topic) if options.grounding else ""
     background = f"【本次用户设定·故事前提】{inputs.background}\n本次主题：{inputs.topic}\n保留用户人设与明确虚构设定；现实产品和新闻若与最新有来源的事实冲突，应更正旧背景，不得默认把真实事件当成虚构。"
@@ -161,7 +164,7 @@ def load_story(engine, artifact: PreparedStory):
     )
     engine.persona_card = PersonaCard.from_dict(source.persona_card)
     engine.stream_lang_context = setup_stream_language_from_topic(
-        source.topic, source.persona
+        source.topic, source.persona, language=source.language
     )
     engine._source_material = {
         "name": source.name,

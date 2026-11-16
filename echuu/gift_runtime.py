@@ -2,6 +2,8 @@ import json
 import logging
 import re
 import copy
+
+from .content_language import add_speech_language_prompt, has_expected_speech_language
 import hashlib
 from concurrent.futures import ThreadPoolExecutor
 from time import monotonic, time
@@ -177,6 +179,8 @@ class GiftRuntime:
                 ensure_ascii=False,
             )
         )
+        language = getattr(getattr(e, "stream_lang_context", None), "explicit_language", None)
+        prompt = add_speech_language_prompt(prompt, language)
         structured = getattr(e.llm_gen, "call", None)
         feedback = ""
         for attempt in range(2):
@@ -274,8 +278,13 @@ class GiftRuntime:
                                segments=min(segments, 100000), max_segments=1))
         if issues:
             raise GiftValidationError("sentence_bounds", issues)
+        language = getattr(getattr(e, "stream_lang_context", None), "explicit_language", None)
         for text in [result.acknowledgement, *result.sentences]:
-            if sanitize_audience_text(text).text != text or not approve_reply(e, text):
+            if (
+                not has_expected_speech_language(text, language)
+                or sanitize_audience_text(text).text != text
+                or not approve_reply(e, text)
+            ):
                 raise GiftValidationError("content_guard")
         return result
 
@@ -301,7 +310,8 @@ class GiftRuntime:
             upcoming[: max(x.sentences for x in batch.items)] if allow_effect else []
         )
         originals = [line.text for _, _, line in targets]
-        thanks = "谢谢大家送来的礼物，心意都收到啦！"
+        language = getattr(getattr(e, "stream_lang_context", None), "explicit_language", None)
+        thanks = "みんな、ギフトを送ってくれてありがとう！" if language == "ja" else "谢谢大家送来的礼物，心意都收到啦！"
         result = None
         model_budget = min(
             getattr(getattr(e, "config", None), "gift_model_timeout_seconds", 2),

@@ -92,6 +92,10 @@ class StorytellingDriver:
         if self.engine is None:
             self.engine = EchuuLiveEngine(config=self.config)
         e, value = self.engine, self.inputs
+        if value.language == "ja" and self.prepared_story is None:
+            from .prepared_story import generate_story
+
+            self.prepared_story = generate_story(value, self.config, self.options, engine=e)
         e.defer_playback_history = True
         e.on_steering = self._diagnostics.append
         e.on_token_hunt = self._diagnostics.append

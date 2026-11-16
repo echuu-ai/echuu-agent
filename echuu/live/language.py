@@ -219,8 +219,9 @@ class StreamLanguageContext:
     """
     直播语言上下文
     """
-    primary_language: Language     # 直播主语言（从topic检测）
-    greeting_style: str            # 欢迎语风格描述
+    primary_language: Language
+    greeting_style: str
+    explicit_language: str | None = None
 
     def get_language_hint_for_llm(self, danmaku_text: str) -> str:
         """
@@ -269,7 +270,9 @@ class StreamLanguageContext:
         return False
 
 
-def setup_stream_language_from_topic(topic: str, persona: str = "") -> StreamLanguageContext:
+def setup_stream_language_from_topic(
+    topic: str, persona: str = "", *, language: str | None = None
+) -> StreamLanguageContext:
     """
     从topic检测并设置直播语言
 
@@ -280,6 +283,8 @@ def setup_stream_language_from_topic(topic: str, persona: str = "") -> StreamLan
     Returns:
         StreamLanguageContext
     """
+    if language == "ja":
+        return StreamLanguageContext(Language.JA, "日本語の配信、自然な口調", language)
     topic_lang = detect_language(topic)
 
     # 从persona检测额外的语言线索
