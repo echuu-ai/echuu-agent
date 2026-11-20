@@ -253,3 +253,40 @@ def test_gift_rewrites_only_current_pending_body_and_never_selected_sections():
         assert fresh.state.script_lines[1].text == baseline["draft"]["lines"][1]["text"]
     finally:
         runtime.close()
+
+
+@pytest.mark.parametrize(("language", "name", "speech"), [
+    ("zh", "Chinese", "我刚刚打开了房间，大家都能听到我的声音。"),
+    ("en", "English", "The room is open and I can hear everyone."),
+    ("ja", "Japanese", "部屋に入ってみると、みんなの声がちゃんと聞こえてきました。"),
+    ("ko", "Korean", "방에 들어가 보니 모두의 목소리가 아주 잘 들렸어요."),
+])
+def test_saved_story_keeps_selected_language_on_reload(language, name, speech):
+    from echuu.core.persona_model import RichPersona
+    from echuu.core.unit import ScriptLine, Show
+    from echuu.core.unit_planner import UnitPlanner
+    from echuu.generators.legacy_v4 import ScriptGeneratorV4
+    from tests.test_clip_repair import Writer, plan
+
+    material = "中文人设，英文观众留言"
+    source = SessionInput(session_id="room", name="Airi", persona=material, topic="房间里的声音", language=language)
+    units = UnitPlanner().plan(2)
+    text = speech if len(speech) >= 38 else speech * 2
+    lines = [{"id": f"L{i+1:03d}", "text": text} for i in range(7)]
+    body = {"lines": lines, "quotables": [{"line_id":"L001", "quote":speech[:8]}]}
+    class Recorder(Writer):
+        def call(self, prompt, **kwargs):
+            assert name in kwargs["system"]
+            return super().call(prompt, **kwargs)
+    generator = ScriptGeneratorV4(Recorder([plan(), body]))
+    generator.generate(source.name, material, "", source.topic, language=language, character_config={"output_format":"shareable_clip"})
+    for i, line in enumerate(lines):
+        units[i // 4].lines.append(ScriptLine(**line, stage="pad"))
+    show = Show(RichPersona(material, "", "紧张"), source.topic, units)
+    artifact = PreparedStory.capture(source, show, generator.last_trace, background="")
+    engine = SimpleNamespace()
+    load_story(engine, PreparedStory.model_validate_json(artifact.model_dump_json()))
+    assert engine.state.persona == material
+    assert engine.state.script_lines[-1].text == text
+    assert engine.stream_lang_context.primary_language.value == language
+    assert name in engine.stream_lang_context.get_language_hint_for_llm("Hello in English!")

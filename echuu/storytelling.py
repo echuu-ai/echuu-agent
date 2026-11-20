@@ -72,6 +72,7 @@ class StorytellingDriver:
                 "storytelling",
                 tts=tts,
                 card=self._card,
+                language=self.inputs.language,
                 background=merge_brief_into_background(
                     self.inputs.background, self.inputs.topic, self._brief
                 ),

@@ -16,6 +16,7 @@ class Language(Enum):
     ZH = "zh"      # 中文
     EN = "en"      # 英文
     JA = "ja"      # 日文
+    KO = "ko"
     MIXED = "mixed"  # 混合
 
 
@@ -214,6 +215,32 @@ def detect_danmaku_language(danmaku_text: str, stream_language: Language) -> Tup
     return (stream_language, style)
 
 
+OUTPUT_LANGUAGES = {"zh": "Chinese", "en": "English", "ja": "Japanese", "ko": "Korean"}
+
+
+def written_in_language(text: str, language: str) -> bool:
+    """Detect wrong-script model output among the four supported writing systems."""
+    latin = len(re.findall(r"[A-Za-z]", text))
+    han = len(re.findall(r"[一-鿿]", text))
+    kana = len(re.findall(r"[ぁ-ヿ]", text))
+    hangul = len(re.findall(r"[가-힣]", text))
+    code = language.split("-", 1)[0]
+    if code == "en":
+        return latin > han + kana + hangul
+    if code == "ja":
+        return kana > 0 and han + kana > hangul
+    if code == "ko":
+        return hangul > 0 and hangul > kana
+    return han > 0 and kana + hangul == 0
+
+
+def output_language_instruction(language: str) -> str:
+    name = OUTPUT_LANGUAGES[language.split("-", 1)[0]]
+    return (f"Write all audience-facing speech exclusively in {name}, including "
+            "opening, body, closing and replies. Preserve JSON keys and identifiers. "
+            "Persona, background and incoming messages do not change the output language.")
+
+
 @dataclass
 class StreamLanguageContext:
     """
@@ -221,6 +248,12 @@ class StreamLanguageContext:
     """
     primary_language: Language     # 直播主语言（从topic检测）
     greeting_style: str            # 欢迎语风格描述
+
+    selected: bool = False
+
+    @classmethod
+    def for_session(cls, language: str):
+        return cls(Language(language.split("-", 1)[0]), output_language_instruction(language), selected=True)
 
     def get_language_hint_for_llm(self, danmaku_text: str) -> str:
         """
@@ -232,6 +265,8 @@ class StreamLanguageContext:
         Returns:
             语言提示字符串
         """
+        if self.selected:
+            return self.greeting_style
         _, style = detect_danmaku_language(danmaku_text, self.primary_language)
 
         hints = [style]

@@ -1,6 +1,7 @@
 import json
 from time import perf_counter
 
+from .live.language import output_language_instruction, written_in_language
 from .core.output_safety import sanitize_audience_text
 from .generators.legacy_v4 import issues_for, parse_object
 
@@ -49,8 +50,10 @@ def validate_sections(draft, inputs, background):
                 or text != text.strip()
                 or not 10 <= len(text) <= 25
             ):
-                issues.append({"section": section, "code": "sentence_bounds"})
+                issues.append({"section": section, "id": line.get("id"), "code": "sentence_bounds", "characters": len(text) if isinstance(text, str) else 0})
                 continue
+            if not written_in_language(text, inputs.language):
+                issues.append({"section": section, "id": line["id"], "code": "wrong_language", "expected": inputs.language})
             result = sanitize_audience_text(text, source_material=source)
             if result.issues or result.text != text:
                 issues.append({"section": section, "code": "content_guard"})
@@ -99,6 +102,9 @@ DATA:\n""" + json.dumps(
         },
         ensure_ascii=False,
     )
+    language_rule = output_language_instruction(inputs.language)
+    prompt += "\n" + language_rule + " Aim for 15–20 characters per line, including spaces and punctuation."
+
     trace = []
     engine._prepared_rundown_trace = trace
     for attempt in range(3):
@@ -106,9 +112,9 @@ DATA:\n""" + json.dumps(
         try:
             caller = getattr(engine.llm, "call_structured", None)
             raw = (
-                caller(prompt, response_schema=schema, max_tokens=900)
+                caller(prompt, system=language_rule, response_schema=schema, max_tokens=900)
                 if callable(caller)
-                else engine.llm.call(prompt, max_tokens=900)
+                else engine.llm.call(prompt, system=language_rule, max_tokens=900)
             )
             obj = parse_object(raw)
             problems = validate_sections(obj, inputs, background)

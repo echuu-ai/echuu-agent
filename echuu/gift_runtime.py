@@ -301,7 +301,12 @@ class GiftRuntime:
             upcoming[: max(x.sentences for x in batch.items)] if allow_effect else []
         )
         originals = [line.text for _, _, line in targets]
-        thanks = "谢谢大家送来的礼物，心意都收到啦！"
+        language = getattr(getattr(e, "stream_lang_context", None), "primary_language", None)
+        thanks = {
+            "en": "Thank you all for the gifts!",
+            "ja": "みんな、ギフトをありがとう！",
+            "ko": "여러분, 선물 정말 고마워요!",
+        }.get(getattr(language, "value", None), "谢谢大家送来的礼物，心意都收到啦！")
         result = None
         model_budget = min(
             getattr(getattr(e, "config", None), "gift_model_timeout_seconds", 2),

@@ -5,6 +5,7 @@ import json
 from typing import Protocol
 
 from echuu.diagnostics import diagnostic
+from echuu.live.language import output_language_instruction, written_in_language
 from echuu.live.untrusted import render_untrusted, sanitize_untrusted
 
 
@@ -52,7 +53,7 @@ class DanmakuInterleaver:
 
     def respond(self, *, identity: str, verbal_tics, topic: str,
                 last_line: str, danmaku_text: str, user: str,
-                card=None, gags=None, evolution=None) -> str | None:
+                card=None, gags=None, evolution=None, language=None) -> str | None:
         tics = "、".join(verbal_tics) if verbal_tics else "（自然口语）"
         # 人设卡加成：固定称呼；雷点被戳 → 破防加倍；骄傲点被夸/被质疑 → 反应加倍；顺手挂已埋的梗
         card_rules = ""
@@ -85,15 +86,20 @@ class DanmakuInterleaver:
             card_rules=card_rules,
             evolution=json.dumps(evolution or {}, ensure_ascii=False),
         )
+        if language:
+            prompt += "\n" + output_language_instruction(language)
         try:
-            reply = self.llm.generate(prompt)
+            for _ in range(2 if language else 1):
+                reply = (self.llm.generate(prompt) or "").strip().strip('"“”')
+                if not reply:
+                    return None
+                if language and not written_in_language(reply, language):
+                    prompt += "\nRewrite the response. " + output_language_instruction(language)
+                    continue
+                return reply if len(reply) <= 40 else None
         except Exception as exc:
             diagnostic(f"[DanmakuInterleaver] LLM 调用失败，跳过本次穿插: {exc}")
-            return None
-        reply = (reply or "").strip().strip('"“”')
-        if len(reply) > 40:
-            return None
-        return reply or None
+        return None
 
     def no_reaction_quip(self, *, identity: str, verbal_tics, topic: str,
                          question: str) -> str | None:
