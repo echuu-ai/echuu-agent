@@ -6,6 +6,10 @@ No partial continuation may commit a topic change.
 from __future__ import annotations
 
 import json
+
+from echuu.content_language import (
+    add_speech_language_prompt, has_expected_speech_language, speech_language_instruction,
+)
 import re
 from dataclasses import dataclass
 
@@ -126,15 +130,18 @@ class TopicEvolution:
                 }},
             },
         }
+        language = context.get("language")
         prompt = PROMPT + json.dumps(data, ensure_ascii=False, default=str)
+        instruction = speech_language_instruction(language)
+        options = {"system": instruction} if instruction else {}
         try:
             structured = getattr(self.llm, "call_structured", None)
             if callable(structured):
-                raw = structured(prompt, max_tokens=min(18000, 1000 + len(lines) * 200), response_schema=schema)
+                raw = structured(prompt, max_tokens=min(18000, 1000 + len(lines) * 200), response_schema=schema, **options)
             elif callable(getattr(self.llm, "call", None)):
-                raw = self.llm.call(prompt, max_tokens=min(18000, 1000 + len(lines) * 200))
+                raw = self.llm.call(prompt, max_tokens=min(18000, 1000 + len(lines) * 200), **options)
             else:
-                raw = self.llm.generate(prompt)
+                raw = self.llm.generate(add_speech_language_prompt(prompt, language))
             raw = raw.strip()
             if raw.startswith("```"):
                 raw = raw.split("\n", 1)[1].rsplit("```", 1)[0]
@@ -169,6 +176,8 @@ class TopicEvolution:
                 text = patch.get("text")
                 if not isinstance(text, str) or not text.strip() or len(text) > 180:
                     return self._reject("line_text", "新台词为空或超过180字符", retry=True)
+                if not has_expected_speech_language(text, language):
+                    return self._reject("wrong_language", instruction, retry=True)
             if all(p["text"].strip() == old["text"] for p, old in zip(patches, lines)):
                 return self._reject("unchanged", "新稿与旧稿完全相同", retry=True)
             plan = TopicPlan(action, topic, direction, reason, tuple((p["id"], p["text"].strip()) for p in patches))

@@ -2,6 +2,11 @@ import json
 import logging
 import re
 import copy
+
+from .content_language import (
+    SPOKEN_GIFT_THANKS, add_speech_language_prompt, has_expected_speech_language,
+    speech_language_instruction,
+)
 import hashlib
 from concurrent.futures import ThreadPoolExecutor
 from time import monotonic, time
@@ -177,6 +182,9 @@ class GiftRuntime:
                 ensure_ascii=False,
             )
         )
+        language = getattr(getattr(e, "stream_lang_context", None), "explicit_language", None)
+        instruction = speech_language_instruction(language)
+        options = {"system": instruction} if instruction else {}
         structured = getattr(e.llm_gen, "call", None)
         feedback = ""
         for attempt in range(2):
@@ -185,9 +193,9 @@ class GiftRuntime:
             trace.begin()
             try:
                 raw = (
-                    structured(prompt + feedback, max_tokens=400, response_schema=schema)
+                    structured(prompt + feedback, max_tokens=400, response_schema=schema, **options)
                     if callable(structured)
-                    else e.llm_gen.generate(prompt + feedback)
+                    else e.llm_gen.generate(add_speech_language_prompt(prompt + feedback, language))
                 )
                 if monotonic() >= deadline:
                     raise TimeoutError("Gift model budget exhausted")
@@ -274,8 +282,13 @@ class GiftRuntime:
                                segments=min(segments, 100000), max_segments=1))
         if issues:
             raise GiftValidationError("sentence_bounds", issues)
+        language = getattr(getattr(e, "stream_lang_context", None), "explicit_language", None)
         for text in [result.acknowledgement, *result.sentences]:
-            if sanitize_audience_text(text).text != text or not approve_reply(e, text):
+            if (
+                not has_expected_speech_language(text, language)
+                or sanitize_audience_text(text).text != text
+                or not approve_reply(e, text)
+            ):
                 raise GiftValidationError("content_guard")
         return result
 
@@ -301,12 +314,8 @@ class GiftRuntime:
             upcoming[: max(x.sentences for x in batch.items)] if allow_effect else []
         )
         originals = [line.text for _, _, line in targets]
-        language = getattr(getattr(e, "stream_lang_context", None), "primary_language", None)
-        thanks = {
-            "en": "Thank you all for the gifts!",
-            "ja": "みんな、ギフトをありがとう！",
-            "ko": "여러분, 선물 정말 고마워요!",
-        }.get(getattr(language, "value", None), "谢谢大家送来的礼物，心意都收到啦！")
+        language = getattr(getattr(e, "stream_lang_context", None), "explicit_language", None)
+        thanks = SPOKEN_GIFT_THANKS.get(language, "谢谢大家送来的礼物，心意都收到啦！")
         result = None
         model_budget = min(
             getattr(getattr(e, "config", None), "gift_model_timeout_seconds", 2),

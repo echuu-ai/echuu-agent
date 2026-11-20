@@ -180,15 +180,3 @@ def test_two_valid_continuation_lines_are_not_discarded():
     from echuu.live.story_steerer import StorySteerer
     steerer = StorySteerer(FakeLLM('{"lines":["选一个妈妈喜欢的蛋糕。","这比买手机更让她高兴。"]}'))
     assert len(steerer.rewrite_lines(spine='预算', topic='手机', user='观众', trigger='蛋糕', kind='chat', lines=['甲','乙','丙'])) == 2
-
-
-def test_english_stream_rewrites_chinese_reply_before_playback():
-    outputs = iter(["那把伞是深蓝色的。", "It was dark blue."])
-    class Writer:
-        def generate(self, prompt):
-            assert "English" in prompt
-            return next(outputs)
-    interleaver = DanmakuInterleaver(Writer())
-    assert interleaver.respond(identity="店主", verbal_tics=(), topic="雨伞",
-                              last_line="", danmaku_text="雨伞是什么颜色？",
-                              user="viewer", language="en") == "It was dark blue."

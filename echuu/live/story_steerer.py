@@ -10,6 +10,7 @@ import json
 from dataclasses import replace
 from typing import Protocol
 
+from echuu.content_language import add_speech_language_prompt, speech_language_instruction
 from echuu.diagnostics import diagnostic
 from echuu.live.untrusted import sanitize_untrusted
 
@@ -117,7 +118,7 @@ class StorySteerer:
 
     def rewrite_line(self, *, spine: str, topic: str, user: str, trigger: str,
                      kind: str, line: str, entities: list | None = None,
-                     role: str = "follow") -> str | None:
+                     role: str = "follow", language: str | None = None) -> str | None:
         labels = []
         for item in entities or []:
             if isinstance(item, dict):
@@ -152,7 +153,11 @@ class StorySteerer:
                 line=line or "",
             )
         try:
-            text = self.llm.generate(prompt)
+            caller = getattr(self.llm, "call", None)
+            if language and callable(caller):
+                text = caller(prompt, system=speech_language_instruction(language))
+            else:
+                text = self.llm.generate(add_speech_language_prompt(prompt, language))
         except Exception as exc:  # noqa: BLE001 — 转向失败不挡当场回应
             diagnostic(f"[StorySteerer] 改写下一句失败（跳过）: {exc}")
             return None

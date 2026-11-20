@@ -20,6 +20,9 @@ from typing import Dict, List, Optional
 from echuu.diagnostics import diagnostic
 
 from ..config import EngineConfig
+from ..content_language import (
+    SPOKEN_ACKNOWLEDGEMENTS, SPOKEN_GIFT_ACKNOWLEDGEMENTS, has_expected_speech_language,
+)
 from ..core.output_safety import sanitize_audience_text
 from ..core.pattern_analyzer import PatternAnalyzer
 from ..core.persona_analyst import PROMPT_VERSION as ANALYST_PROMPT_VERSION
@@ -49,7 +52,7 @@ from .audio_player import StreamSimulator
 from .danmaku import DanmakuEvaluator, DanmakuHandler
 from .danmaku_interleave import DanmakuInterleaver
 from .gifts import normalize_gift
-from .language import StreamLanguageContext, output_language_instruction, written_in_language
+from .language import StreamLanguageContext, setup_stream_language_from_topic
 from .llm_factory import create_llm_client
 from .motion import pick_motion_for_danmaku, pick_motion_for_step
 from .performer import PerformerV3
@@ -122,14 +125,11 @@ class _LLMGenerateAdapter:
     def __init__(self, client, max_tokens: int = 8000) -> None:
         self._client = client
         self._max_tokens = max_tokens
-        self.output_language = None
         self.provider = client.__class__.__name__
         self.model = str(getattr(client, "model", "") or "unknown")
         self.calls: list[dict] = []
 
     def generate(self, prompt: str) -> str:
-        if self.output_language:
-            prompt = output_language_instruction(self.output_language) + "\n" + prompt
         started = perf_counter()
         call = {
             "provider": self.provider,
@@ -165,8 +165,6 @@ class _LLMGenerateAdapter:
     def call(self, prompt: str, system: str | None = None, max_tokens: int | None = None, response_schema=None) -> str:
         """Expose the historical V4 client contract while retaining telemetry."""
         started = perf_counter()
-        if self.output_language:
-            system = (system or "") + "\n" + output_language_instruction(self.output_language)
         token_limit = int(max_tokens or self._max_tokens)
         call = {
             "provider": self.provider,
@@ -430,7 +428,6 @@ class EchuuLiveEngine:
                     clip_client = QwenClient(api_key=self.llm.api_key, model=clip_model)
                     clip_client.seed = seed
                     clip_adapter = _LLMGenerateAdapter(clip_client)
-                    clip_adapter.output_language = language
                     generator = ScriptGeneratorV4(clip_adapter, self.example_sampler)
         # The revised writer is deterministic apart from the seeded provider call;
         # do not serialize network requests with the old process-global RNG lock.
@@ -633,8 +630,9 @@ class EchuuLiveEngine:
                 "prompt_text": render_tuning_guidance(self.tuning_guidance),
             },
         })
-        self.stream_lang_context = StreamLanguageContext.for_session(language)
-        self.llm_gen.output_language = language
+        self.stream_lang_context = setup_stream_language_from_topic(
+            topic, persona, language=language if language != "zh" else None
+        )
         diagnostic(f"🌐 语言设置: {self.stream_lang_context.greeting_style}")
 
         # 用户人设卡（可选）：口癖/称呼/雷点等硬约束，贯穿 analyst/writer/弹幕回应
@@ -1274,6 +1272,9 @@ class EchuuLiveEngine:
         self.emit_steering(picked, "processing")
         return picked
 
+    def _explicit_speech_language(self):
+        return getattr(getattr(self, "stream_lang_context", None), "explicit_language", None)
+
     def _upcoming_script_lines(self):
         """还没播出的台词（当前行之后）。"""
         show = getattr(self.state, "show", None)
@@ -1315,6 +1316,8 @@ class EchuuLiveEngine:
         core = getattr(show, "story_core", None)
         spine = getattr(core, "spine", "") if core else ""
         if kind == "tangent":
+            language = self._explicit_speech_language()
+            locale_options = {"language": language} if language else {}
             notes = []
             branch = self.story_steerer.rewrite_line(
                 spine=spine,
@@ -1325,8 +1328,9 @@ class EchuuLiveEngine:
                 line=getattr(upcoming[0][2], "text", "") or "",
                 entities=getattr(dm, "entities", None) or [],
                 role="branch",
+                **locale_options,
             )
-            if branch:
+            if branch and has_expected_speech_language(branch, language):
                 upcoming[0][2].text = branch
                 notes.append(branch[:32])
             if len(upcoming) > 1:
@@ -1339,8 +1343,9 @@ class EchuuLiveEngine:
                     line=getattr(upcoming[1][2], "text", "") or "",
                     entities=getattr(dm, "entities", None) or [],
                     role="return",
+                    **locale_options,
                 )
-                if back:
+                if back and has_expected_speech_language(back, language):
                     upcoming[1][2].text = back
                     notes.append("回主线")
             return " · ".join(notes) if notes else "沿着线索讲一小段再回来"
@@ -1390,6 +1395,9 @@ class EchuuLiveEngine:
             "committed_bridge": getattr(self, "_committed_bridge", []),
             "source_material": source,
         }
+        language = self._explicit_speech_language()
+        if language:
+            context["language"] = language
         evolution = getattr(self, "topic_evolution", None)
         if evolution is None:
             return dm.reason
@@ -1412,7 +1420,7 @@ class EchuuLiveEngine:
                 text, source_material=getattr(self, "_source_material", None),
                 tuning_guidance=getattr(self, "tuning_guidance", None),
             ).text
-            if not safe.strip():
+            if not safe.strip() or not has_expected_speech_language(safe, language):
                 dm.action, dm.outcome = "reply", "fallback"
                 return "改写内容未通过检查，保留原稿"
             cleaned.append(safe)
@@ -1454,10 +1462,8 @@ class EchuuLiveEngine:
         persona = getattr(self.state.show, "persona", None)
         identity = getattr(persona, "identity", "") if persona else ""
         verbal_tics = getattr(persona, "verbal_tics", ()) if persona else ()
-        selected = getattr(getattr(self, "stream_lang_context", None), "primary_language", None)
-        language = getattr(selected, "value", None)
+        language = self._explicit_speech_language()
         reply = self.danmaku_interleaver.respond(
-            language=language if language in ("zh", "en", "ja", "ko") else None,
             identity=identity, verbal_tics=verbal_tics, topic=self.state.topic,
             last_line=last_line, danmaku_text=dm.text, user=dm.user,
             card=getattr(self, "persona_card", None),
@@ -1465,12 +1471,14 @@ class EchuuLiveEngine:
             evolution={"action": dm.action, "topic": self.state.topic, "reason": dm.reason,
                        "gift_name": dm.gift_name, "gift_category": dm.gift_category,
                        "recent_spoken": getattr(self.state, "spoken_history", [])[-8:]},
+            **({"language": language} if language else {}),
         )
-        neutral = {"en": "Thanks for your message!", "ja": "コメントありがとう！", "ko": "메시지 고마워요!"}.get(getattr(selected, "value", None))
+        if not reply:
+            reply = SPOKEN_ACKNOWLEDGEMENTS.get(language)
         if not reply:
             user = (getattr(dm, "user", "") or "你").strip() or "你"
             snippet = (dm.text or "").strip()[:10]
-            reply = neutral or f"{user}我看见了{'，' + snippet if snippet else ''}，我接着讲。"
+            reply = f"{user}我看见了{'，' + snippet if snippet else ''}，我接着讲。"
         reply = sanitize_audience_text(
             reply,
             source_material=getattr(self, "_source_material", None),
@@ -1486,10 +1494,11 @@ class EchuuLiveEngine:
             "topic_history": getattr(self.state, "topic_history", []),
         }, interaction=dm.to_public()):
             # A neutral acknowledgment adds no new biography, preference or promise.
-            reply = neutral or (f"谢谢你的{dm.gift_name}，我接着聊。" if dm.gift_name else "看到你的消息了，我接着聊。")
-        if language in ("en", "ja", "ko", "zh") and not written_in_language(reply, language):
-            reply = neutral or "看到你的消息了，谢谢！"
-        if not approve_reply(self, reply):
+            if dm.gift_name:
+                reply = SPOKEN_GIFT_ACKNOWLEDGEMENTS.get(language, f"谢谢你的{dm.gift_name}，我接着聊。")
+            else:
+                reply = SPOKEN_ACKNOWLEDGEMENTS.get(language, "看到你的消息了，我接着聊。")
+        if not has_expected_speech_language(reply, language) or not approve_reply(self, reply):
             return None
         try:
             audio = self.tts.synthesize(reply) if getattr(self, "tts", None) else None
@@ -1511,11 +1520,13 @@ class EchuuLiveEngine:
     def _maybe_no_reaction_quip(self, unit_idx: int, question: str):
         """互动点没人理时的自嘲兜底 step（人设化生成，失败返回 None 直接跳过）。"""
         persona = getattr(self.state.show, "persona", None)
+        language = self._explicit_speech_language()
         quip = self.danmaku_interleaver.no_reaction_quip(
             identity=getattr(persona, "identity", "") if persona else "",
             verbal_tics=getattr(persona, "verbal_tics", ()) if persona else (),
             topic=self.state.topic,
             question=question,
+            **({"language": language} if language else {}),
         )
         if not quip:
             return None

@@ -1,7 +1,9 @@
 import json
 from time import perf_counter
 
-from .live.language import output_language_instruction, written_in_language
+from .content_language import (
+    RUNDOWN_LINE_LIMITS, add_speech_language_prompt, has_expected_speech_language,
+)
 from .core.output_safety import sanitize_audience_text
 from .generators.legacy_v4 import issues_for, parse_object
 
@@ -27,6 +29,7 @@ def validate_sections(draft, inputs, background):
     }
     issues = []
     tics = (inputs.persona_card or {}).get("speech_tics", [])
+    min_length, max_length = RUNDOWN_LINE_LIMITS.get(inputs.language, (10, 25))
     for section, lower, upper, prefix in (
         ("opening", 2, 3, "O"),
         ("closing", 1, 2, "C"),
@@ -48,12 +51,12 @@ def validate_sections(draft, inputs, background):
             if (
                 not isinstance(text, str)
                 or text != text.strip()
-                or not 10 <= len(text) <= 25
+                or not min_length <= len(text) <= max_length
             ):
-                issues.append({"section": section, "id": line.get("id"), "code": "sentence_bounds", "characters": len(text) if isinstance(text, str) else 0})
+                issues.append({"section": section, "code": "sentence_bounds"})
                 continue
-            if not written_in_language(text, inputs.language):
-                issues.append({"section": section, "id": line["id"], "code": "wrong_language", "expected": inputs.language})
+            if not has_expected_speech_language(text, inputs.language):
+                issues.append({"section": section, "code": "wrong_language"})
             result = sanitize_audience_text(text, source_material=source)
             if result.issues or result.text != text:
                 issues.append({"section": section, "code": "content_guard"})
@@ -66,6 +69,7 @@ def validate_sections(draft, inputs, background):
 
 def generate_sections(engine, inputs, background, draft):
     """Generate the selected opening/closing before any room or TTS is opened."""
+    min_length, max_length = RUNDOWN_LINE_LIMITS.get(inputs.language, (10, 25))
     schema = {
         "type": "object",
         "properties": {},
@@ -81,17 +85,17 @@ def generate_sections(engine, inputs, background, draft):
                 "type": "object",
                 "properties": {
                     "id": {"type": "string", "pattern": f"^{prefix}[0-9]{{3}}$"},
-                    "text": {"type": "string", "minLength": 10, "maxLength": 25},
+                    "text": {"type": "string", "minLength": min_length, "maxLength": max_length},
                     "emotion": {"type": "string", "enum": sorted(EMOTIONS[section])},
                 },
                 "required": ["id", "text", "emotion"],
                 "additionalProperties": False,
             },
         }
-    prompt = """为已通过校验的正文补齐开场和收尾，正文不得重写。返回 opening、closing 两个数组的 JSON 对象。
+    prompt = f"""为已通过校验的正文补齐开场和收尾，正文不得重写。返回 opening、closing 两个数组的 JSON 对象。
 开场2至3句，ID依次O001、O002、O003；先自然打招呼，再过渡到正文，不自报身份、不念主题或节目预告。
 收尾1至2句，ID依次C001、C002；简短收束既定正文并道别，不升华，不致谢陪伴，不依赖直播中是否收到礼物，不新增事件或经历。
-每句严格10至25个字符（含标点），口语，无括号动作和内部指令。每行只有id、text、emotion三个字段。
+每句严格{min_length}至{max_length}个字符（含标点），口语，无括号动作和内部指令。每行只有id、text、emotion三个字段。
 开场情绪joy/excited/surprised/shy；收尾joy/relaxed/shy。
 保留用户人设和背景，口癖仅用配置中的词；不编造已收到的礼物、弹幕或亲身经历；现实事实只引用给定背景。
 DATA:\n""" + json.dumps(
@@ -102,9 +106,8 @@ DATA:\n""" + json.dumps(
         },
         ensure_ascii=False,
     )
-    language_rule = output_language_instruction(inputs.language)
-    prompt += "\n" + language_rule + " Aim for 15–20 characters per line, including spaces and punctuation."
-
+    if not inputs.language.startswith("zh"):
+        prompt = add_speech_language_prompt(prompt, inputs.language)
     trace = []
     engine._prepared_rundown_trace = trace
     for attempt in range(3):
@@ -112,9 +115,9 @@ DATA:\n""" + json.dumps(
         try:
             caller = getattr(engine.llm, "call_structured", None)
             raw = (
-                caller(prompt, system=language_rule, response_schema=schema, max_tokens=900)
+                caller(prompt, response_schema=schema, max_tokens=900)
                 if callable(caller)
-                else engine.llm.call(prompt, system=language_rule, max_tokens=900)
+                else engine.llm.call(prompt, max_tokens=900)
             )
             obj = parse_object(raw)
             problems = validate_sections(obj, inputs, background)

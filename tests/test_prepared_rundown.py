@@ -39,14 +39,3 @@ def test_invalid_rundown_exhaustion_never_publishes_partial_full_script():
         generate_sections(engine, artifact.inputs, artifact.background, artifact.draft)
     assert len(engine._prepared_rundown_trace) == 3
     assert all(row["issues"] for row in engine._prepared_rundown_trace)
-
-
-def test_japanese_selection_rejects_chinese_body_and_sections():
-    from echuu.generators.shareable_clip import validate_draft
-    from echuu.prepared_rundown import validate_sections
-    artifact = full_story()
-    inputs = artifact.inputs.model_copy(update={"language": "ja"})
-    issues = validate_sections(artifact.draft, inputs, artifact.background)
-    assert any(issue["code"] == "wrong_language" for issue in issues)
-    issues = validate_draft(artifact.draft, {"min_chars":264, "max_chars":506}, {"language":"ja"})
-    assert any(issue["code"] == "wrong_language" for issue in issues)

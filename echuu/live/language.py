@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import re
+
+from ..content_language import add_speech_language_prompt
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 from enum import Enum
@@ -16,7 +18,7 @@ class Language(Enum):
     ZH = "zh"      # 中文
     EN = "en"      # 英文
     JA = "ja"      # 日文
-    KO = "ko"
+    KO = "ko"      # 韩文
     MIXED = "mixed"  # 混合
 
 
@@ -53,6 +55,8 @@ class LanguageProfile:
             return f"Welcome {username} to {vtuber_name}'s stream!"
         elif self.primary == Language.JA:
             return f"{username}さん、{vtuber_name}のライブにようこそ！"
+        elif self.primary == Language.KO:
+            return f"{username}님, {vtuber_name} 방송에 오신 걸 환영해요!"
         else:  # 混合
             # 根据次要语言选择
             if self.secondary == Language.EN:
@@ -215,45 +219,14 @@ def detect_danmaku_language(danmaku_text: str, stream_language: Language) -> Tup
     return (stream_language, style)
 
 
-OUTPUT_LANGUAGES = {"zh": "Chinese", "en": "English", "ja": "Japanese", "ko": "Korean"}
-
-
-def written_in_language(text: str, language: str) -> bool:
-    """Detect wrong-script model output among the four supported writing systems."""
-    latin = len(re.findall(r"[A-Za-z]", text))
-    han = len(re.findall(r"[一-鿿]", text))
-    kana = len(re.findall(r"[ぁ-ヿ]", text))
-    hangul = len(re.findall(r"[가-힣]", text))
-    code = language.split("-", 1)[0]
-    if code == "en":
-        return latin > han + kana + hangul
-    if code == "ja":
-        return kana > 0 and han + kana > hangul
-    if code == "ko":
-        return hangul > 0 and hangul > kana
-    return han > 0 and kana + hangul == 0
-
-
-def output_language_instruction(language: str) -> str:
-    name = OUTPUT_LANGUAGES[language.split("-", 1)[0]]
-    return (f"Write all audience-facing speech exclusively in {name}, including "
-            "opening, body, closing and replies. Preserve JSON keys and identifiers. "
-            "Persona, background and incoming messages do not change the output language.")
-
-
 @dataclass
 class StreamLanguageContext:
     """
     直播语言上下文
     """
-    primary_language: Language     # 直播主语言（从topic检测）
-    greeting_style: str            # 欢迎语风格描述
-
-    selected: bool = False
-
-    @classmethod
-    def for_session(cls, language: str):
-        return cls(Language(language.split("-", 1)[0]), output_language_instruction(language), selected=True)
+    primary_language: Language
+    greeting_style: str
+    explicit_language: str | None = None
 
     def get_language_hint_for_llm(self, danmaku_text: str) -> str:
         """
@@ -265,8 +238,8 @@ class StreamLanguageContext:
         Returns:
             语言提示字符串
         """
-        if self.selected:
-            return self.greeting_style
+        if self.explicit_language:
+            return add_speech_language_prompt("", self.explicit_language).strip()
         _, style = detect_danmaku_language(danmaku_text, self.primary_language)
 
         hints = [style]
@@ -304,7 +277,9 @@ class StreamLanguageContext:
         return False
 
 
-def setup_stream_language_from_topic(topic: str, persona: str = "") -> StreamLanguageContext:
+def setup_stream_language_from_topic(
+    topic: str, persona: str = "", *, language: str | None = None
+) -> StreamLanguageContext:
     """
     从topic检测并设置直播语言
 
@@ -315,6 +290,17 @@ def setup_stream_language_from_topic(topic: str, persona: str = "") -> StreamLan
     Returns:
         StreamLanguageContext
     """
+    if language and language.startswith("zh"):
+        language = "zh"
+    explicit_styles = {
+        "zh": (Language.ZH, "中文直播，自然口语化"),
+        "en": (Language.EN, "English stream, casual and friendly"),
+        "ja": (Language.JA, "日本語の配信、自然な口調"),
+        "ko": (Language.KO, "자연스러운 한국어 방송"),
+    }
+    if language in explicit_styles:
+        primary, style = explicit_styles[language]
+        return StreamLanguageContext(primary, style, language)
     topic_lang = detect_language(topic)
 
     # 从persona检测额外的语言线索
