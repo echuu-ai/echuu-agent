@@ -49,7 +49,7 @@ from .audio_player import StreamSimulator
 from .danmaku import DanmakuEvaluator, DanmakuHandler
 from .danmaku_interleave import DanmakuInterleaver
 from .gifts import normalize_gift
-from .language import StreamLanguageContext, output_language_instruction
+from .language import StreamLanguageContext, output_language_instruction, written_in_language
 from .llm_factory import create_llm_client
 from .motion import pick_motion_for_danmaku, pick_motion_for_step
 from .performer import PerformerV3
@@ -1454,7 +1454,10 @@ class EchuuLiveEngine:
         persona = getattr(self.state.show, "persona", None)
         identity = getattr(persona, "identity", "") if persona else ""
         verbal_tics = getattr(persona, "verbal_tics", ()) if persona else ()
+        selected = getattr(getattr(self, "stream_lang_context", None), "primary_language", None)
+        language = getattr(selected, "value", None)
         reply = self.danmaku_interleaver.respond(
+            language=language if language in ("zh", "en", "ja", "ko") else None,
             identity=identity, verbal_tics=verbal_tics, topic=self.state.topic,
             last_line=last_line, danmaku_text=dm.text, user=dm.user,
             card=getattr(self, "persona_card", None),
@@ -1463,7 +1466,6 @@ class EchuuLiveEngine:
                        "gift_name": dm.gift_name, "gift_category": dm.gift_category,
                        "recent_spoken": getattr(self.state, "spoken_history", [])[-8:]},
         )
-        selected = getattr(getattr(self, "stream_lang_context", None), "primary_language", None)
         neutral = {"en": "Thanks for your message!", "ja": "コメントありがとう！", "ko": "메시지 고마워요!"}.get(getattr(selected, "value", None))
         if not reply:
             user = (getattr(dm, "user", "") or "你").strip() or "你"
@@ -1485,6 +1487,8 @@ class EchuuLiveEngine:
         }, interaction=dm.to_public()):
             # A neutral acknowledgment adds no new biography, preference or promise.
             reply = neutral or (f"谢谢你的{dm.gift_name}，我接着聊。" if dm.gift_name else "看到你的消息了，我接着聊。")
+        if language in ("en", "ja", "ko", "zh") and not written_in_language(reply, language):
+            reply = neutral or "看到你的消息了，谢谢！"
         if not approve_reply(self, reply):
             return None
         try:
