@@ -118,3 +118,13 @@ def test_small_remaining_deficit_gets_another_targeted_expansion_within_call_cap
     assert trace["draft_attempts"][3]["mode"] == "expand_beat"
     assert len(writer.prompts) == 5 and trace["calls"] <= 6
     assert sum(len(line.text) for line in lines) >= trace["budget"]["min_chars"]
+
+
+def test_english_length_repair_requests_shortening_with_actual_excess():
+    oversized = draft()
+    for line in oversized["lines"]:
+        line["text"] *= 2
+    writer = Writer([plan(), oversized, draft()])
+    ScriptGeneratorV4(writer).generate("Mika", "", "", "雨夜", language="en",
+                                       character_config={"output_format":"shareable_clip"})
+    assert "Shorten" in writer.prompts[-1]
