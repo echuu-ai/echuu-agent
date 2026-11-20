@@ -5,6 +5,7 @@ from typing import Literal
 
 from pydantic import Field, JsonValue, TypeAdapter, model_validator
 
+from .live.language import OUTPUT_LANGUAGES, StreamLanguageContext
 from .session_types import Contract, SessionInput, SessionOptions
 
 
@@ -81,8 +82,8 @@ class PreparedStory(Contract):
 
     @classmethod
     def capture(cls, inputs, show, trace, *, background):
-        if trace.get("status") != "completed" or not inputs.language.startswith("zh"):
-            raise ValueError("Only fully validated Chinese clips can be saved")
+        if trace.get("status") != "completed" or inputs.language.split("-", 1)[0] not in OUTPUT_LANGUAGES:
+            raise ValueError("Only fully validated supported-language clips can be saved")
         if (
             trace.get("budget", {}).get("min_chars") != 264
             or trace.get("budget", {}).get("max_chars") != 506
@@ -104,8 +105,8 @@ def generate_story(inputs, config, options: SessionOptions, *, engine=None):
     from .live.engine import EchuuLiveEngine
     from .modes.topic_brief import merge_brief_into_background, produce_topic_brief
 
-    if config.story_pipeline != "legacy_v4" or not inputs.language.startswith("zh"):
-        raise ValueError("Prepared stories require the Chinese legacy clip pipeline")
+    if config.story_pipeline != "legacy_v4" or inputs.language.split("-", 1)[0] not in OUTPUT_LANGUAGES:
+        raise ValueError("Unsupported prepared story pipeline or output language")
     engine = engine or EchuuLiveEngine(config=config)
     brief = produce_topic_brief(engine.llm, inputs.topic) if options.grounding else ""
     background = f"【本次用户设定·故事前提】{inputs.background}\n本次主题：{inputs.topic}\n保留用户人设与明确虚构设定；现实产品和新闻若与最新有来源的事实冲突，应更正旧背景，不得默认把真实事件当成虚构。"
@@ -138,7 +139,6 @@ def load_story(engine, artifact: PreparedStory):
     from .core.persona_card import PersonaCard
     from .core.persona_model import RichPersona
     from .core.unit import Show, Unit
-    from .live.language import setup_stream_language_from_topic
     from .live.performer import PerformerV3
     from .live.state import PerformanceState, PerformerMemory
 
@@ -160,9 +160,9 @@ def load_story(engine, artifact: PreparedStory):
         memory=memory,
     )
     engine.persona_card = PersonaCard.from_dict(source.persona_card)
-    engine.stream_lang_context = setup_stream_language_from_topic(
-        source.topic, source.persona
-    )
+    engine.stream_lang_context = StreamLanguageContext.for_session(source.language)
+    if hasattr(engine, "llm_gen"):
+        engine.llm_gen.output_language = source.language
     engine._source_material = {
         "name": source.name,
         "persona": source.persona,

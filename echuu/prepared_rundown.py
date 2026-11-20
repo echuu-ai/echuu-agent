@@ -1,6 +1,7 @@
 import json
 from time import perf_counter
 
+from .live.language import output_language_instruction
 from .core.output_safety import sanitize_audience_text
 from .generators.legacy_v4 import issues_for, parse_object
 
@@ -99,6 +100,7 @@ DATA:\n""" + json.dumps(
         },
         ensure_ascii=False,
     )
+    prompt = output_language_instruction(inputs.language) + "\n" + prompt
     trace = []
     engine._prepared_rundown_trace = trace
     for attempt in range(3):

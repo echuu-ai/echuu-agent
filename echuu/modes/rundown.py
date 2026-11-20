@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Callable, List, Optional
 
 from echuu.diagnostics import diagnostic
+from echuu.live.language import output_language_instruction
 
 from .reaction import _cls_instruction, _parse_json_array
 
@@ -44,8 +45,9 @@ _GAG_RECALL_RULE = (
 )
 
 
-def _generate_lines(engine, prompt: str) -> List[dict]:
-    raw = engine.llm.call(prompt, max_tokens=400)
+
+def _generate_lines(engine, prompt: str, language: str) -> List[dict]:
+    raw = engine.llm.call(output_language_instruction(language) + "\n" + prompt, max_tokens=400)
     items = _parse_json_array(raw)
     lines = []
     for item in items:
@@ -55,7 +57,7 @@ def _generate_lines(engine, prompt: str) -> List[dict]:
         lines.append({
             "text": text,
             "emotion": str(item.get("emotion", "joy")).lower(),
-            "language": "zh",
+            "language": language,
         })
     return lines
 
@@ -104,19 +106,20 @@ def _card_rules(card) -> str:
 
 def produce_opening_events(engine, name: str, persona: str, topic: str, mode: str,
                            on_phase: Optional[Callable[[str], None]] = None,
-                           tts=None, card=None, background: str = "") -> List[dict]:
+                           tts=None, card=None, background: str = "", language: str = "zh") -> List[dict]:
     intent = _MODE_INTENT.get(mode, _MODE_INTENT["storytelling"]).format(topic=topic)
     prompt = _OPENING_PROMPT.format(name=name, persona=persona, intent=intent) + _card_rules(card)
     if background:
         prompt += "\n本次用户背景（优先保留其中已发生的事实）：" + background
-    lines = _generate_lines(engine, prompt)[:3]
-    lines = engine.structure_breaker.insert_thread_loss(lines, probability=0.2)
+    lines = _generate_lines(engine, prompt, language)[:3]
+    if language == "zh":
+        lines = engine.structure_breaker.insert_thread_loss(lines, probability=0.2)
     return _to_events(lines, mode, "opening", tts or engine.tts, on_phase)
 
 
 def produce_closing_events(engine, name: str, persona: str, topic: str, mode: str,
                            on_phase: Optional[Callable[[str], None]] = None,
-                           tts=None, card=None, background: str = "", spoken_lines=None) -> List[dict]:
+                           tts=None, card=None, background: str = "", spoken_lines=None, language: str = "zh") -> List[dict]:
     intent = _MODE_INTENT.get(mode, _MODE_INTENT["storytelling"]).format(topic=topic)
     prompt = _CLOSING_PROMPT.format(name=name, persona=persona, intent=intent) + _card_rules(card)
     prompt += "\n只收束本场已讲内容，不新增经历、外部查询、产品判断或下一件事。保留本次用户设定，不能否定它。"
@@ -129,8 +132,9 @@ def produce_closing_events(engine, name: str, persona: str, topic: str, mode: st
     gags = engine.gag_ledger.unrecalled() if getattr(engine, "gag_ledger", None) else []
     if gags:
         prompt += _GAG_RECALL_RULE.format(gag=gags[0])
-    lines = _generate_lines(engine, prompt)[:2]
-    lines = engine.structure_breaker.break_structure(lines, topic=topic, language="zh")
+    lines = _generate_lines(engine, prompt, language)[:2]
+    if language == "zh":
+        lines = engine.structure_breaker.break_structure(lines, topic=topic, language=language)
     if gags:
         engine.gag_ledger.mark_recalled(gags[0])
     return _to_events(lines, mode, "closing", tts or engine.tts, on_phase)
