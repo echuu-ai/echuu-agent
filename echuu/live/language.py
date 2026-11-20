@@ -218,6 +218,22 @@ def detect_danmaku_language(danmaku_text: str, stream_language: Language) -> Tup
 OUTPUT_LANGUAGES = {"zh": "Chinese", "en": "English", "ja": "Japanese", "ko": "Korean"}
 
 
+def written_in_language(text: str, language: str) -> bool:
+    """Detect wrong-script model output among the four supported writing systems."""
+    latin = len(re.findall(r"[A-Za-z]", text))
+    han = len(re.findall(r"[一-鿿]", text))
+    kana = len(re.findall(r"[ぁ-ヿ]", text))
+    hangul = len(re.findall(r"[가-힣]", text))
+    code = language.split("-", 1)[0]
+    if code == "en":
+        return latin > han + kana + hangul
+    if code == "ja":
+        return kana > 0 and han + kana > hangul
+    if code == "ko":
+        return hangul > 0 and hangul > kana
+    return han > 0 and kana + hangul == 0
+
+
 def output_language_instruction(language: str) -> str:
     name = OUTPUT_LANGUAGES[language.split("-", 1)[0]]
     return (f"Write all audience-facing speech exclusively in {name}, including "

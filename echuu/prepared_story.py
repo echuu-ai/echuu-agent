@@ -56,7 +56,7 @@ class PreparedStory(Contract):
         issues = validate_draft(
             self.draft,
             {"min_chars": 264, "max_chars": 506},
-            {"speech_tics": list(card.speech_tics) if card else []},
+            {"language": self.inputs.language, "speech_tics": list(card.speech_tics) if card else []},
         )
         if issues:
             raise ValueError("Prepared story fails original clip constraints")
